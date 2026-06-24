@@ -2,6 +2,8 @@
 
 De los **microdatos de la Encuesta Nacional de Hogares (ENAHO)** del INEI a un **tema de investigación económico** concreto, viable y puntuado — todo desde una TUI (interfaz de terminal).
 
+![Diagrama del sistema: identificación y propuesta de temas a partir de la ENAHO](docs/pipeline.png)
+
 El sistema descarga y organiza la data, la documenta, y luego usa razonamiento (con tu suscripción de Claude, vía Claude Code en modo headless) para **proponer temas, seleccionar variables, medir brechas reales con pandas, contrastar con literatura web y puntuar** la propuesta.
 
 ---
