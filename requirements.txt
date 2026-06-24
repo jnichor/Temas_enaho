@@ -1,0 +1,7 @@
+perustats
+polars
+pandas
+pdfplumber
+reportlab
+textual
+rich

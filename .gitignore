@@ -1,0 +1,24 @@
+# --- Microdatos del INEI (pesados y re-descargables; NO van al repo) ---
+enaho_*/
+
+# --- Salidas generadas por el sistema ---
+temas/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# --- Temporales / logs ---
+*.log
+_gen_*.py
+_tmp*
+
+# --- SO / editor ---
+.DS_Store
+Thumbs.db
+
+# --- Config local de Claude Code (no compartir) ---
+.claude/settings.local.json
