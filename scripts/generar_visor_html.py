@@ -488,7 +488,9 @@ def build_html(base, year, ydir):
                      % (search, esc(f), tags, info_line, detalle, dict_html, tabla, esc(os.path.join(md, f)), esc(m['delim'])))
 
     P.append('<script>%s</script></div></body></html>' % JS)
-    out = os.path.join(ydir, 'documentacion_enaho_año%s.html' % year)
+    sal = os.path.join('salidas', str(year))
+    os.makedirs(sal, exist_ok=True)
+    out = os.path.join(sal, 'visor_enaho_%s.html' % year)
     with open(out, 'w', encoding='utf-8') as fh:
         fh.write('\n'.join(P))
     return out, len(files)

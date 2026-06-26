@@ -333,7 +333,9 @@ def build_pdf(base, year, ydir):
         canvas.line(1.8 * cm, 1.4 * cm, A4[0] - 1.8 * cm, 1.4 * cm)
         canvas.restoreState()
 
-    out = os.path.join(ydir, 'documentacion_enaho_año%s.pdf' % year)
+    sal = os.path.join('salidas', str(year))
+    os.makedirs(sal, exist_ok=True)
+    out = os.path.join(sal, 'documentacion_enaho_%s.pdf' % year)
     doc = SimpleDocTemplate(out, pagesize=A4, title='Documentación ENAHO %s' % year,
                             leftMargin=1.8 * cm, rightMargin=1.8 * cm,
                             topMargin=1.6 * cm, bottomMargin=1.8 * cm)

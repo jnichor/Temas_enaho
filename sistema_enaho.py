@@ -26,13 +26,14 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (Header, Footer, Button, Static, RichLog, Input,
-                             RadioSet, RadioButton, ListView, ListItem, Label)
+                             RadioSet, RadioButton, ListView, ListItem, Label, SelectionList)
 from textual import work
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, 'scripts'))
 import razonador as RZ          # noqa: E402
 import estadistica as EST       # noqa: E402
+import ficha_pdf as FICHA       # noqa: E402
 
 PYENV = {**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}
 
@@ -133,6 +134,28 @@ class SelectScreen(ModalScreen):
     def on_button_pressed(self, e: Button.Pressed):
         if e.button.id == "cancel":
             self.dismiss(None)
+
+
+class YearMultiScreen(ModalScreen):
+    """Selección de UNO o VARIOS años (multi-año)."""
+    def __init__(self, anios):
+        super().__init__()
+        self.anios = anios
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label("Elige uno o varios años (espacio para marcar)", classes="dtitle")
+            yield SelectionList(*[(a, a, i == len(self.anios) - 1) for i, a in enumerate(self.anios)], id="years")
+            with Horizontal(classes="drow"):
+                yield Button("Continuar", variant="primary", id="ok")
+                yield Button("Cancelar", id="cancel")
+
+    def on_button_pressed(self, e: Button.Pressed):
+        if e.button.id == "cancel":
+            self.dismiss(None)
+            return
+        sel = list(self.query_one("#years", SelectionList).selected)
+        self.dismiss(sorted(sel) or None)
 
 
 # ----------------------------- app principal -----------------------------
@@ -312,19 +335,25 @@ class ENAHOApp(App):
         if not años:
             log.write("[red]No hay catálogo. Corre primero 3·4 Documentar o c Catálogo.[/]")
             return
-        year = años[-1] if len(años) == 1 else await self.push_screen_wait(
-            SelectScreen("Año a usar", [(a, a) for a in años]))
-        if not year:
+        sel_anios = [años[0]] if len(años) == 1 else await self.push_screen_wait(YearMultiScreen(años))
+        if not sel_anios:
             return
-        cat = await asyncio.to_thread(RZ.load_catalogo, year)
-
-        sel = await self.push_screen_wait(AreaScreen())
-        if not sel:
+        ar = await self.push_screen_wait(AreaScreen())
+        if not ar:
             return
-        modo, area, contexto = sel
+        modo, area, contexto = ar
 
-        res = {'anio': year, 'tema': None}
+        res = {'anios': sel_anios, 'tema': None}
         try:
+            self._set_busy("Cargando catálogo multi-año")
+            mcat = await asyncio.to_thread(RZ.catalogo_multianio, sel_anios)
+            rep = sel_anios[-1]
+            cat = await asyncio.to_thread(RZ.load_catalogo, rep)
+            self._busy = None
+            if not mcat or not cat:
+                log.write("[red]No se pudo cargar el catálogo de esos años.[/]")
+                return
+
             if modo == "B":
                 self._set_busy("Paso 5 · proponiendo áreas")
                 areas = await asyncio.to_thread(RZ.sugerir_areas, cat, 3)
@@ -334,46 +363,52 @@ class ENAHOApp(App):
                 if not area:
                     return
 
-            self._set_busy("Paso 5 · sugiriendo temas")
-            temas = await asyncio.to_thread(RZ.sugerir_temas, cat, area, contexto, 4)
+            self._set_busy("Paso 5 · sugiriendo temas (multi-año)")
+            temas = await asyncio.to_thread(RZ.sugerir_temas_multi, mcat, area, contexto, 4)
             self._busy = None
-            tema = await self.push_screen_wait(SelectScreen(
-                "Elige un tema de investigación", [(t.get('tema', ''), t) for t in temas]))
+            tema = await self.push_screen_wait(SelectScreen("Elige un tema de investigación", [
+                ("%s  [años: %s]" % (t.get('tema', ''), '-'.join(map(str, t.get('cobertura_anios', sel_anios)))), t)
+                for t in temas]))
             if not tema:
                 return
             res['tema'] = tema
-            log.write(Panel(f"[bold]{tema.get('tema')}[/]\n[dim]{tema.get('pregunta_investigacion','')}[/]",
+            cob = [str(a) for a in (tema.get('cobertura_anios') or sel_anios)]
+            res['cobertura_anios'] = cob
+            rep = cob[-1] if cob else rep
+            cat = await asyncio.to_thread(RZ.load_catalogo, rep)
+            log.write(Panel(f"[bold]{tema.get('tema')}[/]\n[dim]{tema.get('pregunta_investigacion','')}[/]\n"
+                            f"[#2ec4d6]Cobertura:[/] {', '.join(cob)} — {tema.get('motivo_cobertura', '')}",
                             title="Tema elegido", border_style="#f0b429"))
 
-            res['analisis'] = await self._paso(log, "Paso 6 · Análisis de módulos",
-                                               RZ.analizar_tema, cat, tema)
-            res['manifiesto'] = await self._paso(log, "Paso 7 · Selección de variables",
-                                                 RZ.seleccionar_variables, cat, tema)
-            res['filtros'] = await self._paso(log, "Plan de datos · filtros",
-                                              RZ.sugerir_filtros, cat, tema, res['manifiesto'])
+            res['analisis'] = await self._paso(log, "Paso 6 · Análisis de módulos", RZ.analizar_tema, cat, tema)
+            res['manifiesto'] = await self._paso(log, "Paso 7 · Selección de variables", RZ.seleccionar_variables, cat, tema)
+            res['causal'] = await self._paso(log, "Diseño causal · identificación", RZ.diseno_causal, cat, tema, res['manifiesto'], cob)
+            res['filtros'] = await self._paso(log, "Plan de datos · filtros", RZ.sugerir_filtros, cat, tema, res['manifiesto'])
             res['plan_datos'] = RZ.plan_de_datos(cat, tema, res['manifiesto'], res['filtros'])
             log.write(self._panel_plan(res['plan_datos']))
-            res['consolidacion'] = await self._paso(log, "Plan de datos · consolidación",
-                                                    EST.revisar_consolidacion, cat, res['manifiesto'], year)
-            plan = await self._paso(log, "Paso 8 · Planificando brechas",
-                                    RZ.plan_brechas, cat, tema, res['manifiesto'])
-            res['brechas'] = await self._paso(log, "Paso 8 · Calculando con pandas",
-                                              EST.calcular, plan, year)
+            res['verificacion_merge'] = await self._paso(log, "Plan de datos · verificar merge", EST.verificar_merge, res['plan_datos'], rep)
+            for vm in res['verificacion_merge']:
+                mk = "[green]✓[/]" if vm.get('ok') else "[red]⚠[/]"
+                log.write(f"  {mk} {vm.get('archivo')}: {vm.get('nota')}")
+            res['consolidacion'] = await self._paso(log, "Plan de datos · consolidación", EST.revisar_consolidacion, cat, res['manifiesto'], rep)
+            plan = await self._paso(log, "Paso 8 · Planificando brechas", RZ.plan_brechas, cat, tema, res['manifiesto'])
+            res['brechas'] = await self._paso(log, "Paso 8 · Calculando con pandas", EST.calcular, plan, rep)
             log.write(self._tabla_brechas(res['brechas']))
-            res['interpretacion'] = await self._paso(log, "Paso 8 · Interpretando",
-                                                     RZ.interpretar_brechas, tema, res['brechas'])
-            res['literatura'] = await self._paso(log, "Paso 9 · Literatura (web)",
-                                                 RZ.contraste_literatura, tema, res['interpretacion'])
-            res['puntuacion'] = await self._paso(log, "Paso 10 · Puntuación",
-                                                 RZ.puntuar, tema, res['interpretacion'],
-                                                 res['literatura'], res['analisis'])
+            res['interpretacion'] = await self._paso(log, "Paso 8 · Interpretando", RZ.interpretar_brechas, tema, res['brechas'])
+            res['literatura'] = await self._paso(log, "Paso 9 · Literatura (web)", RZ.contraste_literatura, tema, res['interpretacion'])
+            res['puntuacion'] = await self._paso(log, "Paso 10 · Puntuación", RZ.puntuar, tema, res['interpretacion'], res['literatura'], res['analisis'])
             log.write(self._ficha(res))
             d = os.path.join(ROOT, 'temas', slug(tema.get('tema', 'tema')))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, 'propuesta.json'), 'w', encoding='utf-8') as fh:
                 json.dump(res, fh, ensure_ascii=False, indent=2)
-            log.write(f"[green]Propuesta guardada en[/] temas/{os.path.basename(d)}/propuesta.json")
-            self.notify("Propuesta de investigación lista 🎉", title="ENAHO", timeout=6)
+            self._set_busy("Generando ficha PDF")
+            pdf_out = os.path.join('salidas', 'fichas', slug(tema.get('tema', 'tema')) + '.pdf')
+            await asyncio.to_thread(FICHA.generar_ficha_pdf, res, cat, pdf_out)
+            self._busy = None
+            log.write(f"[green]Ficha PDF:[/] {pdf_out}")
+            log.write(f"[green]Propuesta:[/] temas/{os.path.basename(d)}/propuesta.json")
+            self.notify("Propuesta lista 🎉 — ficha PDF en salidas/fichas/", title="ENAHO", timeout=7)
         except Exception as ex:
             log.write(f"[red]Falló un paso: {ex}[/]")
             self.notify("Falló el flujo de propuesta", severity="error", timeout=6)
@@ -410,15 +445,23 @@ class ENAHOApp(App):
 
     def _ficha(self, res):
         tema, pds, p = res.get('tema', {}), res.get('plan_datos', {}), res.get('puntuacion', {})
+        cau = res.get('causal') or {}
         manif = [v for v in res.get('manifiesto', []) if isinstance(v, dict)]
-        vs = "\n".join(f"  • {v.get('variable')} ({v.get('rol')})" for v in manif)
+        vs = "\n".join(f"  • {v.get('variable')} ({v.get('rol')})" for v in manif[:12])
+        if len(manif) > 12:
+            vs += f"\n  … (+{len(manif) - 12} más)"
+        cob = ', '.join(map(str, res.get('cobertura_anios') or res.get('anios', [])))
         body = (f"[bold #f0b429]{tema.get('tema')}[/]\n"
-                f"[dim]{tema.get('pregunta_investigacion','')}[/]\n\n"
+                f"[dim]{tema.get('pregunta_investigacion','')}[/]\n"
+                f"[#2ec4d6]Años:[/] {cob}\n\n"
+                f"[b]Diseño causal:[/] {cau.get('estrategia_identificacion','—')} "
+                f"[dim]({cau.get('nivel_causal','?')})[/]\n"
                 f"[b]Módulos:[/] {', '.join(map(str, tema.get('modulos', [])))}\n"
                 f"[b]Variables:[/]\n{vs}\n\n"
                 f"[b]Merge:[/] {pds.get('nivel_de_analisis')} por {'+'.join(pds.get('llaves_merge', []))}\n"
                 f"[b]Filtros:[/] {', '.join(f.get('condicion','') for f in pds.get('filtros', [])) or 'ninguno'}\n\n"
-                f"[b]Puntaje:[/] {p.get('puntaje_total','?')} — {p.get('veredicto','')}")
+                f"[b]Puntaje:[/] {p.get('puntaje_total','?')} — {p.get('veredicto','')}\n"
+                f"[dim]Ficha completa en salidas/fichas/ (PDF)[/]")
         return Panel(body, title="📋 FICHA DE INVESTIGACIÓN", border_style="green", box=box.DOUBLE)
 
 

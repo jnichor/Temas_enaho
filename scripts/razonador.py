@@ -93,6 +93,97 @@ def _modulos_detalle(cat, codigos):
     return sel
 
 
+# ---------- MULTI-AÑO: grounding con disponibilidad de variables por año ----------
+def load_catalogos(anios):
+    out = []
+    for a in anios:
+        c = load_catalogo(str(a))
+        if c:
+            out.append((str(a), c))
+    return out
+
+
+def catalogo_multianio(anios):
+    """Une los catálogos de varios años. Para cada variable registra en qué AÑOS existe."""
+    cats = load_catalogos(anios)
+    if not cats:
+        return None
+    años = [a for a, _ in cats]
+    mods = {}
+    for a, cat in cats:
+        for m in cat['modulos']:
+            cod = m['codigo']
+            d = mods.setdefault(cod, {'codigo': cod, 'titulo': m['titulo'], 'unidad': m['unidad_analisis'],
+                                      'llave': m['llave_identificacion'], 'archivo': m['archivo'], 'variables': {}})
+            for vcode, sig in m['variables'].items():
+                vv = d['variables'].setdefault(vcode.upper(), {'sig': sig, 'anios': set()})
+                vv['anios'].add(a)
+                if sig and not vv['sig']:
+                    vv['sig'] = sig
+    modulos = []
+    for cod, d in mods.items():
+        d['variables'] = {k: {'sig': v['sig'], 'anios': sorted(v['anios'])} for k, v in d['variables'].items()}
+        modulos.append(d)
+    return {'anios': años, 'modulos': modulos, 'n_archivos': len(modulos)}
+
+
+def _compacto_multi(mcat, max_vars=8):
+    años = set(mcat['anios'])
+    out = []
+    for m in mcat['modulos']:
+        ejemplos, nuevas = [], []
+        for code, info in m['variables'].items():
+            if not info['sig']:
+                continue
+            if set(info['anios']) != años:
+                nuevas.append('%s (solo %s)' % (code, ','.join(info['anios'])))
+            elif len(ejemplos) < max_vars:
+                ejemplos.append('%s=%s' % (code, info['sig'][:38]))
+        out.append({'codigo': m['codigo'], 'titulo': m['titulo'], 'unidad': m['unidad'],
+                    'llave': m['llave'], 'ejemplos_variables': ejemplos,
+                    'variables_no_en_todos_los_anios': nuevas[:12]})
+    return out
+
+
+def sugerir_temas_multi(mcat, area=None, contexto=None, n=4):
+    años = mcat['anios']
+    foco = ("Área temática: '%s'." % area) if area else "Áreas económicas variadas."
+    extra = ("\nContexto del usuario (tenlo MUY en cuenta): %s" % contexto) if contexto else ""
+    prompt = (
+        "PASO 5 (multi-año) — Propón %d temas de investigación económicos CAUSALES con la ENAHO. %s%s\n"
+        "Años disponibles: %s.\n\n"
+        "Catálogo (con disponibilidad de variables por año):\n%s\n\n"
+        "REGLAS:\n"
+        "- Plantea preguntas CAUSALES (efecto de X sobre Y), no solo descripciones.\n"
+        "- Algunas variables NO existen en todos los años (campo 'variables_no_en_todos_los_anios'). "
+        "Para cada tema, 'cobertura_anios' = los años que el tema realmente puede cubrir según las variables que usa; "
+        "'motivo_cobertura' = por qué (ej. 'la variable X existe solo desde 2022, así que el tema cubre 2022–2023').\n"
+        "- Solo combina módulos enlazables por sus llaves.\n"
+        "Devuelve JSON: [{\"tema\": str, \"pregunta_investigacion\": str, \"justificacion\": str, "
+        "\"modulos\": [codigos], \"variables_clave\": [str], \"cobertura_anios\": [años], \"motivo_cobertura\": str}]"
+        % (n, foco, extra, ', '.join(años), json.dumps(_compacto_multi(mcat), ensure_ascii=False)))
+    return ask_json(prompt)
+
+
+# ---------- PASO CAUSAL: estrategia de identificación ----------
+def diseno_causal(cat, tema, manifiesto, anios):
+    det = _modulos_detalle(cat, tema.get('modulos', []))
+    prompt = (
+        "DISEÑO CAUSAL — Define la estrategia de identificación causal del tema con datos ENAHO "
+        "(cortes transversales repetidos; años: %s).\n"
+        "Tema: %s\nVariables disponibles:\n%s\n\n"
+        "Define tratamiento, variable resultado, controles (de las variables del manifiesto) y la estrategia: "
+        "OLS con controles (selección sobre observables), variables instrumentales, "
+        "diferencias-en-diferencias (si hay variación temporal/de política entre años), o matching. "
+        "Sé HONESTO: con cortes transversales la causalidad es limitada; si solo permite asociación condicional, dilo "
+        "en 'nivel_causal'.\n"
+        "Devuelve JSON: {\"pregunta_causal\": str, \"tratamiento\": str, \"resultado\": str, "
+        "\"controles\": [str], \"estrategia_identificacion\": str, \"supuestos\": [str], \"amenazas\": [str], "
+        "\"nivel_causal\": \"asociacion|causal_debil|causal_fuerte\"}"
+        % (', '.join(map(str, anios)), tema.get('tema'), json.dumps(det, ensure_ascii=False)))
+    return ask_json(prompt)
+
+
 # ---------- PASO 5A: el sistema propone ÁREAS temáticas al azar ----------
 def sugerir_areas(cat, n=3):
     prompt = (
@@ -180,15 +271,37 @@ def plan_de_datos(cat, tema, manifiesto, filtros):
     persona = any('CODPERSO' in (llave_de.get(a) or []) for a in archivos)
     llaves_merge = ['CONGLOME', 'VIVIENDA', 'HOGAR'] + (['CODPERSO'] if persona else [])
     base = max(archivos, key=lambda a: len(by_file[a])) if archivos else None
-    pasos = []
+    nivel_analisis = 'persona' if persona else 'hogar'
+    pasos, explicacion = [], []
     for a in sorted(archivos, key=lambda a: (a != base, a)):
         disp = llave_de.get(a) or llaves_merge
         k = [x for x in llaves_merge if x in disp] or ['CONGLOME', 'VIVIENDA', 'HOGAR']
+        nivel_a = 'persona' if 'CODPERSO' in (llave_de.get(a) or []) else 'hogar'
+        # broadcast: archivo de HOGAR unido a un análisis a nivel PERSONA -> se replica a cada individuo
+        broadcast = (nivel_analisis == 'persona' and nivel_a == 'hogar')
         pasos.append({'archivo': a, 'llaves_join': k, 'tipo': 'base' if a == base else 'left',
-                      'variables': by_file[a]})
-    return {'nivel_de_analisis': 'persona' if persona else 'hogar',
+                      'nivel': nivel_a, 'broadcast': broadcast, 'variables': by_file[a]})
+
+    explicacion.append("El análisis se hace a nivel %s; las filas se identifican por %s." %
+                       (nivel_analisis.upper(), '+'.join(llaves_merge)))
+    explicacion.append("Se parte del archivo base '%s' y se le unen los demás (LEFT JOIN) por sus llaves comunes." % base)
+    for p in pasos:
+        if p['tipo'] == 'base':
+            continue
+        if p['broadcast']:
+            explicacion.append(
+                "'%s' está a nivel HOGAR: se une por %s y su valor se REPLICA a cada individuo del hogar "
+                "(broadcast). Es válido solo si esas llaves son únicas en ese archivo (1 fila por hogar); "
+                "el sistema lo verifica para no inflar filas." % (p['archivo'], '+'.join(p['llaves_join'])))
+        else:
+            explicacion.append("'%s' está a nivel %s: merge directo por %s (misma unidad, sin replicar)."
+                               % (p['archivo'], p['nivel'], '+'.join(p['llaves_join'])))
+    if filtros:
+        explicacion.append("Luego se filtra la población: %s." %
+                           '; '.join('%s %s' % (f.get('variable'), f.get('condicion')) for f in filtros))
+    return {'nivel_de_analisis': nivel_analisis,
             'llaves_merge': llaves_merge, 'archivo_base': base,
-            'secuencia_merge': pasos, 'filtros': filtros}
+            'secuencia_merge': pasos, 'filtros': filtros, 'explicacion': explicacion}
 
 
 # ---------- PASO 8a: PLAN de brechas (computable) ----------

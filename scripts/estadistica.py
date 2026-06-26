@@ -192,6 +192,37 @@ def revisar_consolidacion(cat, manifiesto, year):
     return rep
 
 
+def verificar_merge(plan, year):
+    """Verifica que cada paso de merge sea válido: si es broadcast hogar→persona,
+    la llave de hogar debe ser ÚNICA en ese archivo (1 fila por hogar) para no inflar filas."""
+    HH = ['CONGLOME', 'VIVIENDA', 'HOGAR']
+    rep = []
+    for p in plan.get('secuencia_merge', []):
+        if p.get('tipo') == 'base':
+            continue
+        if not p.get('broadcast'):
+            rep.append({'archivo': p['archivo'], 'broadcast': False, 'ok': True,
+                        'nota': 'merge directo (misma unidad de análisis), sin replicación'})
+            continue
+        try:
+            df = _load(p['archivo'], year, set(HH))
+            hh = [k for k in HH if k in df.columns]
+            n = len(df)
+            u = df.drop_duplicates(hh).shape[0] if hh else 0
+            ok = (u == n and n > 0)
+            rep.append({'archivo': p['archivo'], 'broadcast': True, 'ok': ok,
+                        'filas': n, 'hogares': u,
+                        'nota': ('llave de hogar ÚNICA → broadcast válido: se asigna 1 valor del hogar a '
+                                 'cada individuo sin duplicar filas'
+                                 if ok else
+                                 'ADVERTENCIA: la llave de hogar NO es única (%s filas, %s hogares) → el '
+                                 'broadcast inflaría filas; primero hay que agregar a nivel hogar' % (n, u))})
+        except Exception as e:
+            rep.append({'archivo': p['archivo'], 'broadcast': True, 'ok': False,
+                        'nota': 'no verificable: %s' % e})
+    return rep
+
+
 def calcular(plan, year):
     res = []
     for item in plan:

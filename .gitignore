@@ -3,6 +3,7 @@ enaho_*/
 
 # --- Salidas generadas por el sistema ---
 temas/
+salidas/
 
 # --- Python ---
 __pycache__/
