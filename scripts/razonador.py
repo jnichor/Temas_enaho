@@ -200,10 +200,14 @@ def sugerir_temas_multi(mcat, area=None, contexto=None, n=4):
         "Para cada tema, 'cobertura_anios' = los años que el tema realmente puede cubrir según las variables que usa; "
         "'motivo_cobertura' = por qué (ej. 'la variable X existe solo desde 2022, así que el tema cubre 2022–2023').\n"
         "- Solo combina módulos enlazables por sus llaves.\n"
+        "- %s\n"
         "Devuelve JSON: [{\"tema\": str, \"pregunta_investigacion\": str, \"justificacion\": str, "
-        "\"modulos\": [codigos], \"variables_clave\": [str], \"cobertura_anios\": [años], \"motivo_cobertura\": str}]"
-        % (n, foco, extra, ', '.join(años), json.dumps(_compacto_multi(mcat), ensure_ascii=False)))
-    return ask_json(prompt, model=MODELOS['sugerir_temas_multi'])
+        "\"modulos\": [codigos], \"variables_clave\": [str], \"cobertura_anios\": [años], \"motivo_cobertura\": str, "
+        "\"nivel_causal_esperado\": \"causal_fuerte|causal_debil|asociacion\", \"justificacion_causal\": str}]"
+        % (n, foco, extra, ', '.join(años), json.dumps(_compacto_multi(mcat), ensure_ascii=False),
+           _REGLA_PRIORIDAD_CAUSAL))
+    temas = ask_json(prompt, model=MODELOS['sugerir_temas_multi'])
+    return _ordenar_por_causalidad(temas)
 
 
 # ---------- PASO CAUSAL: estrategia de identificación ----------
@@ -223,6 +227,32 @@ def diseno_causal(cat, tema, manifiesto, anios):
         "\"nivel_causal\": \"asociacion|causal_debil|causal_fuerte\"}"
         % (', '.join(map(str, anios)), tema.get('tema'), json.dumps(det, ensure_ascii=False)))
     return ask_json(prompt, model=MODELOS['diseno_causal'])
+
+
+# ---------- prioridad causal: fuerte > débil > asociación ----------
+_RANK_CAUSAL = {'causal_fuerte': 0, 'causal_debil': 1, 'asociacion': 2}
+
+
+def _ordenar_por_causalidad(temas):
+    """Orden DETERMINISTA (no confía en que la IA los devuelva ya ordenados):
+    causal_fuerte primero, luego causal_debil, luego asociacion/desconocido al final.
+    Estable: dentro del mismo nivel conserva el orden original."""
+    return sorted(temas, key=lambda t: _RANK_CAUSAL.get(t.get('nivel_causal_esperado'), 3))
+
+
+_REGLA_PRIORIDAD_CAUSAL = (
+    "PRIORIDAD CAUSAL (crítico): para cada tema, evalúa ANTES de proponerlo si existe una "
+    "estrategia de identificación PLAUSIBLE con las variables del catálogo: un instrumento válido "
+    "(variable que afecte el tratamiento pero no el resultado por otra vía), una discontinuidad/corte "
+    "claro (regla de elegibilidad por edad/ingreso/geografía), o una comparación de grupos con variación "
+    "creíble. Clasifica cada tema en 'nivel_causal_esperado': "
+    "'causal_fuerte' (instrumento/discontinuidad plausible y defendible), "
+    "'causal_debil' (solo selección sobre observables, supuestos fuertes no verificables), o "
+    "'asociacion' (no hay estrategia de identificación, solo correlación condicional). "
+    "PRIORIZA proponer temas 'causal_fuerte' primero; si no encuentras ninguno plausible con estos "
+    "datos, propón 'causal_debil' antes que 'asociacion'. Sé honesto: no inventes un instrumento que no "
+    "se sostenga. Incluye 'justificacion_causal': por qué ese nivel (cuál es el instrumento/corte, o por "
+    "qué no lo hay).\n")
 
 
 # ---------- PASO 5A: el sistema propone ÁREAS temáticas al azar ----------
@@ -248,11 +278,14 @@ def sugerir_temas(cat, area=None, contexto=None, n=4):
         "IMPORTANTE: considera la unidad de análisis y la 'llave' de identificación de cada módulo; "
         "propón SOLO combinaciones de módulos ENLAZABLES entre sí por sus llaves comunes "
         "(a nivel hogar: CONGLOME+VIVIENDA+HOGAR; o persona: +CODPERSO). No combines módulos que no se puedan mergear.\n"
+        "%s\n"
         "Para cada tema indica los módulos (códigos) y variables que lo sustentan.\n"
         "Devuelve JSON: [{\"tema\": str, \"pregunta_investigacion\": str, \"justificacion\": str, "
-        "\"modulos\": [codigos], \"variables_clave\": [str]}]"
-        % (cat['anio'], foco, extra, json.dumps(_compacto(cat), ensure_ascii=False), n))
-    return ask_json(prompt, model=MODELOS['sugerir_temas'])
+        "\"modulos\": [codigos], \"variables_clave\": [str], "
+        "\"nivel_causal_esperado\": \"causal_fuerte|causal_debil|asociacion\", \"justificacion_causal\": str}]"
+        % (cat['anio'], foco, extra, json.dumps(_compacto(cat), ensure_ascii=False), n, _REGLA_PRIORIDAD_CAUSAL))
+    temas = ask_json(prompt, model=MODELOS['sugerir_temas'])
+    return _ordenar_por_causalidad(temas)
 
 
 # ---------- PASO 6: análisis de los módulos asociados al tema ----------

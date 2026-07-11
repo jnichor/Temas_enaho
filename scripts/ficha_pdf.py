@@ -10,8 +10,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import cm
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-                                HRFlowable, KeepTogether)
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 
 NAVY = colors.HexColor('#1f3a5f')
 ACCENT = colors.HexColor('#2e7d8c')
@@ -59,6 +58,17 @@ def generar_ficha_pdf(res, cat, out_path):
     cau = res.get('causal') or {}
     if cau:
         el += [Paragraph('Diseño causal e identificación', h2)]
+        esperado = tema.get('nivel_causal_esperado')
+        real = cau.get('nivel_causal')
+        rank = {'causal_fuerte': 0, 'causal_debil': 1, 'asociacion': 2}
+        if esperado:
+            linea = '<b>Solidez causal esperada (al proponer el tema):</b> %s' % esperado
+            if tema.get('justificacion_causal'):
+                linea += ' — %s' % tema['justificacion_causal']
+            el.append(Paragraph(linea, small))
+            if real and rank.get(real, 9) > rank.get(esperado, -1):
+                el.append(Paragraph('<font color="#c62828">⚠ Al elegir las variables concretas, la estrategia '
+                                    'real (%s) resultó menos sólida que lo esperado (%s).</font>' % (real, esperado), small))
         for k, lbl in [('pregunta_causal', 'Pregunta causal'), ('estrategia_identificacion', 'Estrategia de identificación'),
                        ('tratamiento', 'Tratamiento'), ('resultado', 'Variable resultado'),
                        ('controles', 'Controles'), ('supuestos', 'Supuestos clave'), ('amenazas', 'Amenazas a la validez')]:

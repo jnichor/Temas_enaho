@@ -392,8 +392,10 @@ class ENAHOApp(App):
             temas = await asyncio.to_thread(RZ.sugerir_temas_multi, mcat, area, contexto, 4)
             self._busy = None
             self._refresh_status()   # que la barra no siga mostrando ⏳ durante el modal
-            tema = await self.push_screen_wait(SelectScreen("Elige un tema de investigación", [
-                ("%s  [años: %s]" % (t.get('tema', ''), '-'.join(map(str, t.get('cobertura_anios', sel_anios)))), t)
+            _marca = {'causal_fuerte': '🟢 fuerte', 'causal_debil': '🟡 débil', 'asociacion': '⚪ asociación'}
+            tema = await self.push_screen_wait(SelectScreen("Elige un tema de investigación (ordenados por solidez causal)", [
+                ("[%s] %s  [años: %s]" % (_marca.get(t.get('nivel_causal_esperado'), '?'), t.get('tema', ''),
+                                          '-'.join(map(str, t.get('cobertura_anios', sel_anios)))), t)
                 for t in temas]))
             if not tema:
                 return
@@ -421,6 +423,11 @@ class ENAHOApp(App):
                     log.write("[green]✓ Todas las variables seleccionadas existen en todos los años de cobertura.[/]")
             self._guardar_progreso(res)
             res['causal'] = await self._paso(log, "Diseño causal · identificación", RZ.diseno_causal, cat, tema, res['manifiesto'], cob)
+            esperado, real = tema.get('nivel_causal_esperado'), res['causal'].get('nivel_causal')
+            rank = {'causal_fuerte': 0, 'causal_debil': 1, 'asociacion': 2}
+            if esperado and real and rank.get(real, 9) > rank.get(esperado, -1):
+                log.write(f"[yellow]⚠ Se esperaba '{esperado}' pero el diseño real da '{real}': "
+                          f"al elegir las variables concretas, la estrategia se sostiene menos de lo previsto.[/]")
             self._guardar_progreso(res)
             res['filtros'] = await self._paso(log, "Plan de datos · filtros", RZ.sugerir_filtros, cat, tema, res['manifiesto'])
             res['plan_datos'] = RZ.plan_de_datos(cat, tema, res['manifiesto'], res['filtros'])
