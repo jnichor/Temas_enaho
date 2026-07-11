@@ -410,10 +410,10 @@ class ENAHOApp(App):
             log.write(Panel(f"[bold]{tema.get('tema')}[/]\n[dim]{tema.get('pregunta_investigacion','')}[/]\n"
                             f"[#2ec4d6]Cobertura:[/] {', '.join(cob)} — {tema.get('motivo_cobertura', '')}",
                             title="Tema elegido", border_style="#f0b429"))
-            d = self._guardar_progreso(res)   # 1er guardado: ya hay tema+cobertura, aunque falle después
+            d = await self._guardar(res)   # 1er guardado: ya hay tema+cobertura, aunque falle después
 
             res['analisis'] = await self._paso(log, "Paso 6 · Análisis de módulos", RZ.analizar_tema, cat, tema)
-            self._guardar_progreso(res)
+            await self._guardar(res)
             res['manifiesto'] = await self._paso(log, "Paso 7 · Selección de variables",
                                                  RZ.seleccionar_variables, cat, tema, mcat, cob)
             if len(cob) > 1:   # verificación determinista: cada variable debe existir en TODOS los años
@@ -424,14 +424,14 @@ class ENAHOApp(App):
                                   f"{', '.join(f['faltan_en'])} — esa parte del análisis no cubrirá esos años.[/]")
                 else:
                     log.write("[green]✓ Todas las variables seleccionadas existen en todos los años de cobertura.[/]")
-            self._guardar_progreso(res)
+            await self._guardar(res)
             res['causal'] = await self._paso(log, "Diseño causal · identificación", RZ.diseno_causal, cat, tema, res['manifiesto'], cob)
             esperado, real = tema.get('nivel_causal_esperado'), res['causal'].get('nivel_causal')
             rank = {'causal_fuerte': 0, 'causal_debil': 1, 'asociacion': 2}
             if esperado and real and rank.get(real, 9) > rank.get(esperado, -1):
                 log.write(f"[yellow]⚠ Se esperaba '{esperado}' pero el diseño real da '{real}': "
                           f"al elegir las variables concretas, la estrategia se sostiene menos de lo previsto.[/]")
-            self._guardar_progreso(res)
+            await self._guardar(res)
             res['filtros'] = await self._paso(log, "Plan de datos · filtros", RZ.sugerir_filtros, cat, tema, res['manifiesto'])
             res['plan_datos'] = RZ.plan_de_datos(cat, tema, res['manifiesto'], res['filtros'])
             log.write(self._panel_plan(res['plan_datos']))
@@ -440,10 +440,10 @@ class ENAHOApp(App):
                 mk = "[green]✓[/]" if vm.get('ok') else "[red]⚠[/]"
                 log.write(f"  {mk} {vm.get('archivo')}: {vm.get('nota')}")
             res['consolidacion'] = await self._paso(log, "Plan de datos · consolidación", EST.revisar_consolidacion, cat, res['manifiesto'], rep)
-            self._guardar_progreso(res)
+            await self._guardar(res)
             plan = await self._paso(log, "Paso 8 · Planificando brechas", RZ.plan_brechas, cat, tema, res['manifiesto'])
             res['plan_brechas'] = plan   # se guarda para poder diagnosticar sin adivinar si algo falla
-            self._guardar_progreso(res)
+            await self._guardar(res)
             if len(cob) > 1:
                 res['brechas_por_anio'] = await self._paso(
                     log, "Paso 8 · Calculando brechas en %d años" % len(cob),
@@ -456,14 +456,14 @@ class ENAHOApp(App):
                 res['brechas'] = await self._paso(log, "Paso 8 · Calculando brechas", EST.calcular, plan, rep)
                 log.write(self._tabla_brechas(res['brechas']))
                 interp_input = res['brechas']
-            self._guardar_progreso(res)
+            await self._guardar(res)
             res['interpretacion'] = await self._paso(log, "Paso 8 · Interpretando", RZ.interpretar_brechas, tema, interp_input)
-            self._guardar_progreso(res)
+            await self._guardar(res)
             res['literatura'] = await self._paso(log, "Paso 9 · Literatura (web)", RZ.contraste_literatura, tema, res['interpretacion'])
-            self._guardar_progreso(res)
+            await self._guardar(res)
             res['puntuacion'] = await self._paso(log, "Paso 10 · Puntuación", RZ.puntuar, tema, res['interpretacion'], res['literatura'], res['analisis'])
             log.write(self._ficha(res))
-            d = self._guardar_progreso(res, estado='completa')
+            d = await self._guardar(res, estado='completa')
             self._set_busy("Generando ficha PDF")
             pdf_out = os.path.join('salidas', 'fichas', slug(tema.get('tema', 'tema')) + '.pdf')
             await asyncio.to_thread(FICHA.generar_ficha_pdf, res, cat, pdf_out)
@@ -473,7 +473,7 @@ class ENAHOApp(App):
             log.write(f"[green]Propuesta:[/] temas/{os.path.basename(d)}/propuesta.json")
             self.notify("Propuesta lista 🎉 — ficha PDF en salidas/fichas/", title="ENAHO", timeout=7)
         except Exception as ex:
-            d = self._guardar_progreso(res, estado='incompleta', error=str(ex))
+            d = await self._guardar(res, estado='incompleta', error=str(ex))
             log.write(f"[red]Falló un paso: {ex}[/]")
             if d:
                 log.write(f"[yellow]El progreso hasta este punto quedó guardado en "
@@ -498,6 +498,11 @@ class ENAHOApp(App):
         with open(os.path.join(d, 'propuesta.json'), 'w', encoding='utf-8') as fh:
             json.dump(res, fh, ensure_ascii=False, indent=2)
         return d
+
+    async def _guardar(self, res, estado='en_progreso', error=None):
+        # el I/O de archivo corre en un hilo aparte: no bloquea el event loop
+        # async mientras el resto del flujo (modales, otros pasos) sigue activo.
+        return await asyncio.to_thread(self._guardar_progreso, res, estado, error)
 
     async def _paso(self, log, titulo, fn, *args):
         self._set_busy(titulo)

@@ -98,13 +98,23 @@ def _una_brecha(item, year):
         raise ValueError("outcome %s no existe en %s" % (ov, arch_o))
     keys_o = [k for k in KEYS4 if k in co]
 
-    # --- ponderador: resolver archivo y nombre (fallback a cualquier FAC*) ---
+    # --- ponderador: resolver archivo y nombre (fallback a FAC*, determinista) ---
     p = item.get('ponderador') or {}
     warch = p.get('archivo') or arch_o
     wv = (p.get('variable') or '').upper() or None
     w_cols = co if warch == arch_o else _cols(_scan(warch, year))
-    wname = wv if (wv and wv in w_cols) else next((c for c in w_cols if c.startswith('FAC')), None)
-    nota_pond = None
+    notas_iniciales = []
+    if wv and wv in w_cols:
+        wname = wv
+    else:
+        candidatos = sorted(c for c in w_cols if c.startswith('FAC'))  # orden alfabético = determinista
+        wname = candidatos[0] if candidatos else None
+        if len(candidatos) > 1:
+            notas_iniciales.append(
+                'había %d factores de expansión candidatos en %s (%s); se usó %s por defecto '
+                '(orden alfabético) — verifica que sea el correcto para tu análisis'
+                % (len(candidatos), warch, ', '.join(candidatos), wname))
+    nota_pond = ' | '.join(notas_iniciales) if notas_iniciales else None
 
     # --- outcome (+grupo y/o peso si viven en el mismo archivo) ---
     sel = list(dict.fromkeys(
