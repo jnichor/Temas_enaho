@@ -1,30 +1,49 @@
 # -*- coding: utf-8 -*-
 """Paso 8 (motor de cálculo): ejecuta el PLAN de brechas sobre los datos REALES.
 
-El plan lo produce el razonador (IA) anclado al catálogo; aquí solo se COMPUTA
-con pandas, con ponderador (factor de expansión) cuando se indica. Determinista.
+El plan lo produce el razonador (IA) anclado al catálogo; aquí solo se COMPUTA.
+Determinista. Implementado sobre polars en modo STREAMING: nunca materializa un
+archivo entero en RAM (módulos como el 601 tienen ~9M filas / 1.3 GB); solo se
+colecta el frame final de 3 columnas [grupo, outcome, peso].
+
+Garantías de correctitud:
+- Valida NIVELES antes del merge (m:1): si el archivo de grupo tiene varias
+  filas por llave, el join multiplicaría filas e inflaría la estadística; en ese
+  caso se reporta un error claro en vez de calcular mal.
+- Neutraliza centinelas de no-respuesta del INEI (99999, 999999.9, ...).
+- Pondera con el factor de expansión (con fallback a cualquier FAC* del archivo).
+- `calcular_multi` ejecuta el mismo plan en varios años (traduce el año en los
+  nombres de archivo) para ver la evolución de las brechas.
 
 Un ítem del plan:
 {
   "brecha": "Brecha de ingreso laboral por sexo",
-  "outcome": {"archivo": "0005_enaho01a-2024-500.csv", "variable": "I524E1"},
-  "grupo":   {"archivo": "0002_enaho01-2024-200.csv", "variable": "P207",
+  "outcome": {"archivo": "0005_enaho01a-2023-500.csv", "variable": "P524A1"},
+  "grupo":   {"archivo": "0002_enaho01-2023-200.csv", "variable": "P207",
               "etiquetas": {"1": "Hombre", "2": "Mujer"}},
-  "ponderador": {"archivo": "0005_enaho01a-2024-500.csv", "variable": "FACTOR07"},
+  "ponderador": {"archivo": "0005_enaho01a-2023-500.csv", "variable": "FAC500A"},
   "estadistico": "media"   # media | mediana
 }
 """
-import os, glob
+import os, glob, copy
 import numpy as np
-import pandas as pd
+import polars as pl
 
 KEYS4 = ["CONGLOME", "VIVIENDA", "HOGAR", "CODPERSO"]
+# no-respuesta INEI: parte entera de 5+ nueves (99999, 999999.9, ...).
+# Tradeoff deliberado: '9999' (4 dígitos) NO se limpia porque puede ser un valor
+# legítimo (ej. un monto de 9999 soles); si abunda, se emite una NOTA en el
+# resultado para que el usuario lo verifique contra el diccionario.
+SENTINELA = r'^\s*-?9{5,}(\.\d*)?\s*$'
 
 
+# ----------------------------- acceso a archivos -----------------------------
 def _path(archivo, year):
-    base = glob.glob(os.path.join('enaho_*', 'microodatos_inei', 'enaho', '2_organized',
-                                  'by_year', str(year), 'modulos', archivo))
-    return base[0] if base else None
+    # sorted(): resolución DETERMINISTA cuando el mismo año existe en varias
+    # carpetas enaho_* (misma regla que razonador.load_catalogo).
+    hits = sorted(glob.glob(os.path.join('enaho_*', 'microodatos_inei', 'enaho', '2_organized',
+                                         'by_year', str(year), 'modulos', archivo)))
+    return hits[0] if hits else None
 
 
 def _sniff(path):
@@ -33,32 +52,26 @@ def _sniff(path):
     return ';' if l.count(';') > l.count(',') else ','
 
 
-def _load(archivo, year, wanted):
+def _scan(archivo, year):
+    """LazyFrame en streaming con columnas normalizadas a MAYÚSCULAS. No lee datos aún."""
     path = _path(archivo, year)
     if not path:
         raise FileNotFoundError(archivo)
-    wanted = {w.upper() for w in wanted}
-    df = pd.read_csv(path, sep=_sniff(path), encoding='latin-1', dtype=str,
-                     usecols=lambda c: c.strip().upper() in wanted,
-                     on_bad_lines='skip', keep_default_na=False)
-    df.columns = [c.strip().upper() for c in df.columns]
-    return df
+    lf = pl.scan_csv(path, separator=_sniff(path), infer_schema_length=0,
+                     encoding='utf8-lossy', truncate_ragged_lines=True)
+    names = lf.collect_schema().names()
+    return lf.rename({o: o.strip().upper() for o in names})
 
 
-def _cargar_factores(archivo, year):
-    """Carga llaves + todas las columnas de factor de expansión (FAC*) del archivo."""
-    path = _path(archivo, year)
-    df = pd.read_csv(path, sep=_sniff(path), encoding='latin-1', dtype=str,
-                     usecols=lambda c: c.strip().upper() in KEYS4 or c.strip().upper().startswith('FAC'),
-                     on_bad_lines='skip', keep_default_na=False)
-    df.columns = [c.strip().upper() for c in df.columns]
-    return df
+def _cols(lf):
+    return lf.collect_schema().names()
 
 
-def _es_sentinela(s):
-    """Códigos de no-respuesta del INEI: enteros de 5+ dígitos todos 9 (99999, 999999...)."""
-    ent = str(s).strip().split('.')[0].lstrip('-')
-    return ent.isdigit() and len(ent) >= 5 and set(ent) == {'9'}
+def _dup_en_llaves(lf, keys):
+    """True si hay más de una fila por combinación de llaves (agregado en streaming)."""
+    d = (lf.select(keys).group_by(keys).len()
+           .filter(pl.col('len') > 1).limit(1).collect(engine='streaming'))
+    return d.height > 0
 
 
 def _weighted_median(x, w):
@@ -70,56 +83,108 @@ def _weighted_median(x, w):
     return float(x[np.searchsorted(cw, 0.5 * cw[-1])])
 
 
+# ----------------------------- una brecha -----------------------------
 def _una_brecha(item, year):
     ov = item['outcome']['variable'].upper()
     gv = item['grupo']['variable'].upper()
     et = {str(k): v for k, v in (item['grupo'].get('etiquetas') or {}).items()}
-    wv = (item.get('ponderador') or {}).get('variable')
-    wv = wv.upper() if wv else None
     estad = (item.get('estadistico') or 'media').lower()
+    arch_o = item['outcome']['archivo']
+    arch_g = item['grupo']['archivo']
 
-    of = _load(item['outcome']['archivo'], year, set(KEYS4) | {ov})
-    gf = _load(item['grupo']['archivo'], year, set(KEYS4) | {gv})
-    keys = [k for k in KEYS4 if k in of.columns and k in gf.columns]
-    if not keys:
-        raise ValueError("sin llaves comunes para merge")
-    m = of.merge(gf, on=keys, how='inner')
-    pond_usado = None
-    if wv:
-        warch = item['ponderador']['archivo']
-        # carga todas las columnas FAC* del archivo del ponderador (robustez ante nombres)
-        wf_full = _load(warch, year, set(KEYS4) | {c for c in (wv,)})
-        if wv not in wf_full.columns:               # nombre dado no existe -> busca un FAC*
-            wf_full = _cargar_factores(warch, year)
-            cand = [c for c in wf_full.columns if c.startswith('FAC')]
-            wv = cand[0] if cand else None
-        if wv:
-            wk = [k for k in KEYS4 if k in m.columns and k in wf_full.columns]
-            if wk:
-                m = m.merge(wf_full[wk + [wv]], on=wk, how='left')
-                m['_w'] = pd.to_numeric(m[wv], errors='coerce').fillna(0.0)
-                pond_usado = wv
-    if pond_usado is None:
-        m['_w'] = 1.0
-    m[ov] = m[ov].mask(m[ov].map(_es_sentinela))      # neutraliza centinelas de missing (999999)
-    m[ov] = pd.to_numeric(m[ov], errors='coerce')
-    m = m.dropna(subset=[ov])
-    m = m[m[gv].astype(str).str.strip() != '']
+    lo = _scan(arch_o, year)
+    co = _cols(lo)
+    if ov not in co:
+        raise ValueError("outcome %s no existe en %s" % (ov, arch_o))
+    keys_o = [k for k in KEYS4 if k in co]
+
+    # --- ponderador: resolver archivo y nombre (fallback a cualquier FAC*) ---
+    p = item.get('ponderador') or {}
+    warch = p.get('archivo') or arch_o
+    wv = (p.get('variable') or '').upper() or None
+    w_cols = co if warch == arch_o else _cols(_scan(warch, year))
+    wname = wv if (wv and wv in w_cols) else next((c for c in w_cols if c.startswith('FAC')), None)
+    nota_pond = None
+
+    # --- outcome (+grupo y/o peso si viven en el mismo archivo) ---
+    sel = list(dict.fromkeys(
+        keys_o + [ov]
+        + ([gv] if arch_g == arch_o else [])
+        + ([wname] if (wname and warch == arch_o) else [])))
+    faltan = [c for c in sel if c not in co]
+    if faltan:
+        raise ValueError("variables %s no existen en %s" % (faltan, arch_o))
+    lf = lo.select(sel)
+
+    # --- grupo desde OTRO archivo: validar NIVELES (m:1) antes de unir ---
+    if arch_g != arch_o:
+        lg = _scan(arch_g, year)
+        cg = _cols(lg)
+        if gv not in cg:
+            raise ValueError("variable de grupo %s no existe en %s" % (gv, arch_g))
+        keys = [k for k in KEYS4 if k in co and k in cg]
+        if not keys:
+            raise ValueError("sin llaves comunes para merge")
+        lg = lg.select(keys + [gv]).unique()
+        if _dup_en_llaves(lg, keys):
+            raise ValueError(
+                "niveles incompatibles: '%s' tiene varias filas por %s; unirlo "
+                "multiplicaría filas e inflaría la estadística. Usa una variable de "
+                "grupo del mismo archivo del outcome o de un módulo con 1 fila por esa llave."
+                % (arch_g, '+'.join(keys)))
+        lf = lf.join(lg, on=keys, how='inner')
+
+    # --- peso desde OTRO archivo ---
+    if wname and warch != arch_o:
+        lw = _scan(warch, year)
+        cw_ = _cols(lw)
+        wk = [k for k in KEYS4 if k in _cols(lf) and k in cw_]
+        if wk:
+            lw = lw.select(wk + [wname]).unique()
+            if _dup_en_llaves(lw, wk):
+                nota_pond = 'ponderador omitido: %s tiene varias filas por %s' % (warch, '+'.join(wk))
+                wname = None
+            else:
+                lf = lf.join(lw, on=wk, how='left')
+        else:
+            wname = None
+
+    # --- limpieza + colecta SOLO de [grupo, outcome, peso] (streaming) ---
+    lf = lf.with_columns(
+        pl.when(pl.col(ov).str.contains(SENTINELA)).then(pl.lit(None)).otherwise(pl.col(ov)).alias(ov))
+    lf = lf.with_columns(pl.col(ov).cast(pl.Float64, strict=False).alias('_y'))
+    if wname:
+        lf = lf.with_columns(pl.col(wname).cast(pl.Float64, strict=False).fill_null(0.0).alias('_w'))
+    else:
+        lf = lf.with_columns(pl.lit(1.0).alias('_w'))
+    lf = (lf.drop_nulls(['_y'])
+            .drop_nulls([gv])
+            .filter(pl.col(gv).str.strip_chars() != ''))
+    df = lf.select([gv, '_y', '_w']).collect(engine='streaming')
 
     grupos = []
-    for g, sub in m.groupby(gv):
-        x, w = sub[ov].to_numpy(float), sub['_w'].to_numpy(float)
+    for name, sub in df.group_by(gv):
+        g = name[0] if isinstance(name, tuple) else name
+        x, w = sub['_y'].to_numpy(), sub['_w'].to_numpy()
         if estad == 'mediana':
             val = _weighted_median(x, w)
         else:
             val = float(np.average(x, weights=w)) if w.sum() > 0 else float(np.mean(x))
         grupos.append({'grupo': str(g), 'etiqueta': et.get(str(g), str(g)),
-                       'valor': round(val, 2), 'n': int(len(sub))})
+                       'valor': round(val, 2), 'n': int(sub.height)})
     grupos = [gp for gp in grupos if gp['n'] >= 30]   # ignora celdas con muy pocos casos
     grupos.sort(key=lambda d: d['valor'])
     out = {'brecha': item.get('brecha'), 'outcome': ov, 'grupo': gv,
-           'estadistico': estad, 'ponderador': pond_usado or 'sin ponderar',
-           'n_total': int(len(m)), 'grupos': grupos}
+           'estadistico': estad, 'ponderador': wname or 'sin ponderar',
+           'anio': str(year), 'n_total': int(df.height), 'grupos': grupos}
+    notas = [nota_pond] if nota_pond else []
+    n9999 = int((df['_y'] == 9999.0).sum())     # posible código de missing de 4 dígitos
+    if n9999 >= 5:
+        notas.append('%d valores exactamente 9999 en %s: podría ser código de no respuesta '
+                     'de 4 dígitos (verificar en el diccionario); se MANTUVIERON en el cálculo — '
+                     'la mediana es robusta a esto, la media no' % (n9999, ov))
+    if notas:
+        out['nota'] = ' | '.join(notas)
     vals = [gp['valor'] for gp in grupos]
     if len(vals) >= 2 and min(vals) != 0:
         out['brecha_absoluta'] = round(max(vals) - min(vals), 2)
@@ -127,21 +192,58 @@ def _una_brecha(item, year):
     return out
 
 
+def calcular(plan, year):
+    res = []
+    for item in plan:
+        try:
+            res.append(_una_brecha(item, year))
+        except Exception as e:
+            res.append({'brecha': item.get('brecha'), 'anio': str(year), 'error': str(e)})
+    return res
+
+
+# ----------------------------- multi-año -----------------------------
+def _plan_para_anio(plan, rep, year):
+    """Traduce los nombres de archivo del plan (construidos con el año `rep`) a otro año."""
+    if str(rep) == str(year):
+        return plan
+    p2 = copy.deepcopy(plan)
+    for item in p2:
+        for k in ('outcome', 'grupo', 'ponderador'):
+            d = item.get(k)
+            if isinstance(d, dict) and d.get('archivo'):
+                d['archivo'] = d['archivo'].replace(str(rep), str(year))
+    return p2
+
+
+def calcular_multi(plan, anios, rep):
+    """Ejecuta el MISMO plan de brechas en cada año de cobertura (evolución temporal).
+    Los años sin archivo/variable quedan como error explícito, no rompen el resto."""
+    return {str(y): calcular(_plan_para_anio(plan, rep, y), y) for y in anios}
+
+
+# ----------------------------- verificaciones -----------------------------
 def _nfilas(arch, year):
-    return len(_load(arch, year, set(KEYS4)))
+    return int(_scan(arch, year).select(pl.len()).collect(engine='streaming').item())
 
 
 def _overlap_match(arch_a, arch_b, var, year):
-    """% de coincidencia de 'var' entre dos módulos en su población común."""
-    da = _load(arch_a, year, set(KEYS4) | {var}).rename(columns={var: '_A'})
-    db = _load(arch_b, year, set(KEYS4) | {var}).rename(columns={var: '_B'})
-    keys = [k for k in KEYS4 if k in da.columns and k in db.columns]
+    """% de coincidencia de 'var' entre dos módulos en su población común (streaming)."""
+    la, lb = _scan(arch_a, year), _scan(arch_b, year)
+    ca, cb = _cols(la), _cols(lb)
+    if var not in ca or var not in cb:
+        return None, 0
+    keys = [k for k in KEYS4 if k in ca and k in cb]
     if not keys:
         return None, 0
-    m = da.merge(db, on=keys, how='inner')
-    if len(m) == 0:
+    j = (la.select(keys + [var]).rename({var: '_A'})
+           .join(lb.select(keys + [var]).rename({var: '_B'}), on=keys, how='inner'))
+    r = j.select(((pl.col('_A') == pl.col('_B')).cast(pl.Float64).mean() * 100).alias('pct'),
+                 pl.len().alias('n')).collect(engine='streaming')
+    n = int(r['n'][0])
+    if n == 0 or r['pct'][0] is None:
         return None, 0
-    return float((m['_A'] == m['_B']).mean() * 100), len(m)
+    return float(r['pct'][0]), n
 
 
 def revisar_consolidacion(cat, manifiesto, year):
@@ -205,10 +307,11 @@ def verificar_merge(plan, year):
                         'nota': 'merge directo (misma unidad de análisis), sin replicación'})
             continue
         try:
-            df = _load(p['archivo'], year, set(HH))
-            hh = [k for k in HH if k in df.columns]
-            n = len(df)
-            u = df.drop_duplicates(hh).shape[0] if hh else 0
+            lf = _scan(p['archivo'], year)
+            hh = [k for k in HH if k in _cols(lf)]
+            r = lf.select(pl.len().alias('n'),
+                          pl.struct(hh).n_unique().alias('u')).collect(engine='streaming')
+            n, u = int(r['n'][0]), int(r['u'][0])
             ok = (u == n and n > 0)
             rep.append({'archivo': p['archivo'], 'broadcast': True, 'ok': ok,
                         'filas': n, 'hogares': u,
@@ -221,13 +324,3 @@ def verificar_merge(plan, year):
             rep.append({'archivo': p['archivo'], 'broadcast': True, 'ok': False,
                         'nota': 'no verificable: %s' % e})
     return rep
-
-
-def calcular(plan, year):
-    res = []
-    for item in plan:
-        try:
-            res.append(_una_brecha(item, year))
-        except Exception as e:
-            res.append({'brecha': item.get('brecha'), 'error': str(e)})
-    return res

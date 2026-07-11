@@ -67,14 +67,22 @@ def generar_ficha_pdf(res, cat, out_path):
                 v = ', '.join(v) if isinstance(v, list) else v
                 el.append(Paragraph('<b>%s:</b> %s' % (lbl, v), small))
 
-    # Variables (código + significado)
+    # Variables (código + significado) — con aviso si no cubren todos los años
+    parciales = {p['variable']: p for p in (res.get('variables_parciales') or [])}
     el += [Paragraph('Variables a utilizar (código y significado)', h2)]
+    if parciales:
+        el.append(Paragraph('⚠ Las variables marcadas NO existen en todos los años de cobertura; '
+                            'esa parte del análisis queda limitada a los años indicados.', small))
     data = [['Código', 'Significado (diccionario ENAHO)', 'Rol', 'Módulo']]
     for v in res.get('manifiesto', []):
         if not isinstance(v, dict):
             continue
         cod = (v.get('variable') or '').upper()
         sig = lab.get(cod) or v.get('etiqueta') or '(sin etiqueta en diccionario)'
+        if cod in parciales:
+            p = parciales[cod]
+            sig += ' — <font color="#c62828">⚠ solo años: %s</font>' % (
+                ', '.join(p.get('anios_disponibles') or []) or '?')
         data.append([Paragraph(cod, code), Paragraph(sig, cell),
                      Paragraph(v.get('rol', ''), cell), Paragraph(str(v.get('archivo', '')), cell)])
     t = Table(data, colWidths=[70, 240, 70, 110], repeatRows=1)
@@ -105,6 +113,35 @@ def generar_ficha_pdf(res, cat, out_path):
                          Paragraph(str(r.get('brecha_relativa_pct', '—')), cell)])
         t = Table(data, colWidths=[200, 220, 70], repeatRows=1)
         t.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), ACCENT), ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                               ('FONTSIZE', (0, 0), (-1, -1), 7.6), ('GRID', (0, 0), (-1, -1), 0.3, colors.grey),
+                               ('VALIGN', (0, 0), (-1, -1), 'TOP')]))
+        el += [t]
+
+    # Evolución de brechas por año (si el tema cubre varios años)
+    evo = res.get('brechas_por_anio') or {}
+    if len(evo) > 1:
+        el += [Paragraph('Evolución de brechas por año (brecha relativa %)', h2)]
+        anios_e = sorted(evo)
+        nombres = []
+        for y in anios_e:
+            for r in evo[y]:
+                if r.get('brecha') and r['brecha'] not in nombres:
+                    nombres.append(r['brecha'])
+        data = [['Brecha'] + anios_e]
+        for nom in nombres:
+            fila = [Paragraph(nom, cell)]
+            for y in anios_e:
+                r = next((x for x in evo[y] if x.get('brecha') == nom), None)
+                if r is None:
+                    fila.append(Paragraph('—', cell))
+                elif r.get('error'):
+                    fila.append(Paragraph('no calculable', cell))
+                else:
+                    fila.append(Paragraph(str(r.get('brecha_relativa_pct', '—')), cell))
+            data.append(fila)
+        anchos = [220] + [int(270 / max(1, len(anios_e)))] * len(anios_e)
+        t = Table(data, colWidths=anchos, repeatRows=1)
+        t.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), GOLD), ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
                                ('FONTSIZE', (0, 0), (-1, -1), 7.6), ('GRID', (0, 0), (-1, -1), 0.3, colors.grey),
                                ('VALIGN', (0, 0), (-1, -1), 'TOP')]))
         el += [t]

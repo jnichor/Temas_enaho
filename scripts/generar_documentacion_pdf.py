@@ -1,5 +1,4 @@
 import os, re, glob, datetime
-import polars as pl
 import pdfplumber
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -89,79 +88,10 @@ def code_from_filename(fn):
     return (m.group(1).upper() if m else name.upper())
 
 
-def sniff_delim(path):
-    with open(path, encoding='latin-1') as fh:
-        line = fh.readline()
-    return ';' if line.count(';') > line.count(',') else ','
-
-
-def derive_unidad(key):
-    has_person = 'CODPERSO' in key
-    extra = [k for k in key if k not in HHKEYS + ['CODPERSO']]
-    if has_person:
-        return 'persona x registro' if extra else 'persona'
-    if extra:
-        return 'hogar x registro/item'
-    if all(k in key for k in HHKEYS):
-        return 'hogar'
-    return 'indeterminada'
-
-
-def _maxgain(base, pool, n, nuniq, budget=8):
-    extra = []
-    for _ in range(budget):
-        cur = nuniq(base + extra)
-        best, bestu = None, cur
-        for c in pool:
-            if c in extra:
-                continue
-            u = nuniq(base + extra + [c])
-            if u > bestu:
-                bestu, best = u, c
-        if best is None:
-            break
-        extra.append(best)
-        if nuniq(base + extra) == n:
-            break
-    return extra
-
-
-def inspect(path):
-    delim = sniff_delim(path)
-    df = pl.read_csv(path, separator=delim, infer_schema_length=0,
-                     encoding='utf8-lossy', truncate_ragged_lines=True)
-    df.columns = [c.strip().upper() for c in df.columns]
-    cols = df.columns
-    n = df.height
-    base = [k for k in HHKEYS + ['CODPERSO'] if k in cols]
-    nuniq = lambda ks: df.select(ks).n_unique()
-
-    if base and nuniq(base) == n:
-        extra = []
-    elif base:
-        card = {c: df.select(pl.col(c).n_unique()).item() for c in cols if c not in base}
-        pool = [c for c in card if card[c] < 0.5 * n]
-        extra = _maxgain(base, pool, n, nuniq)
-        if nuniq(base + extra) != n:
-            extra = _maxgain(base, list(card), n, nuniq, budget=10)
-        changed = True
-        while changed:
-            changed = False
-            for c in list(extra):
-                if nuniq(base + [x for x in extra if x != c]) == n:
-                    extra.remove(c)
-                    changed = True
-    else:
-        extra = []
-
-    key = base + extra
-    unica = bool(key) and nuniq(key) == n
-    hh = [k for k in HHKEYS if k in cols]
-    nhog = nuniq(hh) if len(hh) == 3 else None
-    npers = nuniq(hh + ['CODPERSO']) if (nhog and 'CODPERSO' in cols) else None
-    return {'delim': delim, 'ncols': len(cols), 'nrows': n, 'key': key,
-            'unica': unica, 'extra': extra, 'unidad': derive_unidad(key),
-            'cols': list(cols), 'nhog': nhog, 'npers': npers}
+# Inspección compartida con el visor HTML: lee en STREAMING (polars scan_csv),
+# nunca materializa el archivo entero en RAM (módulos como el 601 tienen ~9M filas).
+# Una sola implementación para ambos generadores => no vuelven a divergir.
+from generar_visor_html import inspect  # noqa: E402
 
 
 def diferencias_grupo(fs, info, max_vars=12):

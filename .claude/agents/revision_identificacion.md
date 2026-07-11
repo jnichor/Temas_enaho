@@ -38,18 +38,24 @@ Unidad de análisis típica por módulo (referencia, confírmala leyendo las var
 
 ### 1. Localiza los datos
 
-- Con Glob, encuentra las carpetas `enaho_*` en el proyecto y, dentro, los archivos de microdatos (prioriza `.dta` de Stata; también `.sav`, `.csv`).
+- Con Glob, encuentra las carpetas `enaho_*` en el proyecto y, dentro, los archivos de microdatos: **CSV** en `.../2_organized/by_year/<AÑO>/modulos/` (el sistema descarga siempre en CSV).
 - Agrupa por año y por módulo según la estructura de carpetas/nombres de archivo.
 
 ### 2. Inspecciona cada módulo programáticamente
 
-Para cada archivo de datos, lee solo metadatos/primeras filas (NO cargues archivos gigantes completos). Usa Python:
+Para cada archivo de datos, lee solo metadatos/primeras filas (NO cargues archivos gigantes completos). OJO: la mayoría de CSV usan coma pero `sumaria` usa `;` — detecta el delimitador; encoding `latin-1`. Usa Python:
 
 ```python
-import pyreadstat  # o pandas; instala si falta: python -m pip install pyreadstat pandas
+import pandas as pd
 
-# Lee solo metadatos + unas filas
-df, meta = pyreadstat.read_dta("ruta/al/modulo.dta", row_limit=1000)
+def delim(path):
+    with open(path, encoding="latin-1") as fh:
+        l = fh.readline()
+    return ";" if l.count(";") > l.count(",") else ","
+
+# Lee solo unas filas (nunca el archivo completo)
+p = "ruta/al/modulo.csv"
+df = pd.read_csv(p, sep=delim(p), nrows=1000, dtype=str, encoding="latin-1")
 
 cols = [c.upper() for c in df.columns]
 
@@ -68,7 +74,7 @@ def es_unica(df, llaves):
 Determina la unidad de identificación REAL probando combinaciones de llaves y comprobando unicidad de filas en la muestra leída. Deriva la unidad de análisis de:
 - presencia de `CODPERSO` (→ persona),
 - ausencia de `CODPERSO` pero presencia de `CONGLOME/VIVIENDA/HOGAR` únicos (→ hogar),
-- etiquetas de variables (`meta.column_labels`) y nombre del módulo.
+- significado de variables según el catálogo (`catalogo_<año>.json`, campo `variables`) o el diccionario PDF del INEI, y nombre del módulo.
 
 ### 3. Reporta
 

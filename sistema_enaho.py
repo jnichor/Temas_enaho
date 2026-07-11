@@ -6,8 +6,6 @@ Encuesta Nacional de Hogares.
 
 Pasos 1–4 (deterministas) + pasos 5–10 (razonamiento con tu suscripción de Claude).
 Reusa toda la lógica de scripts/. Lanza con:  python sistema_enaho.py
-
-(La versión clásica en Rich queda en sistema_enaho_clasico.py)
 """
 import os
 import sys
@@ -30,6 +28,9 @@ from textual.widgets import (Header, Footer, Button, Static, RichLog, Input,
 from textual import work
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+# Los módulos de scripts/ (estadistica, ficha_pdf) y las salidas usan rutas
+# RELATIVAS al proyecto: anclar el cwd para que funcione lanzado desde cualquier lugar.
+os.chdir(ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'scripts'))
 import razonador as RZ          # noqa: E402
 import estadistica as EST       # noqa: E402
@@ -55,7 +56,10 @@ def estado_global():
                     continue
                 años.add(y)
                 org = org or os.path.isdir(os.path.join(yd, 'modulos'))
-                doc = doc or bool(glob.glob(os.path.join(yd, '*.pdf')) or glob.glob(os.path.join(yd, '*.html')))
+                # la documentación se escribe en salidas/<año>/ (by_year/ queda como legado)
+                sal = os.path.join(ROOT, 'salidas', y)
+                doc = doc or bool(glob.glob(os.path.join(sal, '*.pdf')) or glob.glob(os.path.join(sal, '*.html'))
+                                  or glob.glob(os.path.join(yd, '*.pdf')) or glob.glob(os.path.join(yd, '*.html')))
                 cat = cat or bool(glob.glob(os.path.join(yd, 'catalogo_*.json')))
     return cs, sorted(años), org, doc, cat
 
@@ -180,14 +184,17 @@ class ENAHOApp(App):
     #log { background: #0c1a26; }
     #status { dock: top; height: 1; background: #102a3a; color: #9fb3c0; padding: 0 1; }
     #dialog {
-        width: 72; height: auto; padding: 1 2; background: #102a3a;
+        width: 100; max-width: 95%; height: auto; padding: 1 2; background: #102a3a;
         border: thick #2ec4d6; margin: 2 4;
     }
     .dtitle { text-style: bold; color: #2ec4d6; margin: 0 0 1 0; }
     .drow { height: auto; margin: 1 0 0 0; }
     .drow Button { margin: 0 1 0 0; }
     #dialog Input { margin: 1 0 0 0; }
-    #lst { height: auto; max-height: 14; margin: 1 0; }
+    #lst { height: auto; max-height: 18; margin: 1 0; }
+    /* opciones largas: envolver en varias líneas en vez de cortarse */
+    #lst ListItem { height: auto; padding: 0 1; }
+    #lst Label { width: 1fr; }
     """
     BINDINGS = [
         Binding("1", "descargar", "Descargar"),
@@ -344,12 +351,19 @@ class ENAHOApp(App):
         modo, area, contexto = ar
 
         res = {'anios': sel_anios, 'tema': None}
+        for y in sel_anios:   # aviso: el mismo año en varias carpetas = fuente ambigua
+            carps = RZ.carpetas_de_anio(y)
+            if len(carps) > 1:
+                log.write(f"[yellow]⚠ El año {y} existe en {len(carps)} carpetas "
+                          f"({', '.join(carps)}); se usará '{carps[0]}'. "
+                          f"Elimina duplicados para no mezclar fuentes.[/]")
         try:
             self._set_busy("Cargando catálogo multi-año")
             mcat = await asyncio.to_thread(RZ.catalogo_multianio, sel_anios)
             rep = sel_anios[-1]
             cat = await asyncio.to_thread(RZ.load_catalogo, rep)
             self._busy = None
+            self._refresh_status()   # que la barra no siga mostrando ⏳ durante el modal
             if not mcat or not cat:
                 log.write("[red]No se pudo cargar el catálogo de esos años.[/]")
                 return
@@ -358,6 +372,7 @@ class ENAHOApp(App):
                 self._set_busy("Paso 5 · proponiendo áreas")
                 areas = await asyncio.to_thread(RZ.sugerir_areas, cat, 3)
                 self._busy = None
+                self._refresh_status()   # que la barra no siga mostrando ⏳ durante el modal
                 area = await self.push_screen_wait(SelectScreen(
                     "Elige un área", [(a.get('area', ''), a.get('area')) for a in areas]))
                 if not area:
@@ -366,6 +381,7 @@ class ENAHOApp(App):
             self._set_busy("Paso 5 · sugiriendo temas (multi-año)")
             temas = await asyncio.to_thread(RZ.sugerir_temas_multi, mcat, area, contexto, 4)
             self._busy = None
+            self._refresh_status()   # que la barra no siga mostrando ⏳ durante el modal
             tema = await self.push_screen_wait(SelectScreen("Elige un tema de investigación", [
                 ("%s  [años: %s]" % (t.get('tema', ''), '-'.join(map(str, t.get('cobertura_anios', sel_anios)))), t)
                 for t in temas]))
@@ -381,7 +397,16 @@ class ENAHOApp(App):
                             title="Tema elegido", border_style="#f0b429"))
 
             res['analisis'] = await self._paso(log, "Paso 6 · Análisis de módulos", RZ.analizar_tema, cat, tema)
-            res['manifiesto'] = await self._paso(log, "Paso 7 · Selección de variables", RZ.seleccionar_variables, cat, tema)
+            res['manifiesto'] = await self._paso(log, "Paso 7 · Selección de variables",
+                                                 RZ.seleccionar_variables, cat, tema, mcat, cob)
+            if len(cob) > 1:   # verificación determinista: cada variable debe existir en TODOS los años
+                res['variables_parciales'] = RZ.disponibilidad_variables(mcat, cat, res['manifiesto'], cob)
+                if res['variables_parciales']:
+                    for f in res['variables_parciales']:
+                        log.write(f"[yellow]⚠ {f['variable']} ({f.get('rol','')}) NO existe en: "
+                                  f"{', '.join(f['faltan_en'])} — esa parte del análisis no cubrirá esos años.[/]")
+                else:
+                    log.write("[green]✓ Todas las variables seleccionadas existen en todos los años de cobertura.[/]")
             res['causal'] = await self._paso(log, "Diseño causal · identificación", RZ.diseno_causal, cat, tema, res['manifiesto'], cob)
             res['filtros'] = await self._paso(log, "Plan de datos · filtros", RZ.sugerir_filtros, cat, tema, res['manifiesto'])
             res['plan_datos'] = RZ.plan_de_datos(cat, tema, res['manifiesto'], res['filtros'])
@@ -392,9 +417,19 @@ class ENAHOApp(App):
                 log.write(f"  {mk} {vm.get('archivo')}: {vm.get('nota')}")
             res['consolidacion'] = await self._paso(log, "Plan de datos · consolidación", EST.revisar_consolidacion, cat, res['manifiesto'], rep)
             plan = await self._paso(log, "Paso 8 · Planificando brechas", RZ.plan_brechas, cat, tema, res['manifiesto'])
-            res['brechas'] = await self._paso(log, "Paso 8 · Calculando con pandas", EST.calcular, plan, rep)
-            log.write(self._tabla_brechas(res['brechas']))
-            res['interpretacion'] = await self._paso(log, "Paso 8 · Interpretando", RZ.interpretar_brechas, tema, res['brechas'])
+            if len(cob) > 1:
+                res['brechas_por_anio'] = await self._paso(
+                    log, "Paso 8 · Calculando brechas en %d años" % len(cob),
+                    EST.calcular_multi, plan, cob, rep)
+                res['brechas'] = res['brechas_por_anio'].get(str(rep)) or []
+                log.write(self._tabla_brechas(res['brechas']))
+                log.write(self._tabla_evolucion(res['brechas_por_anio']))
+                interp_input = res['brechas_por_anio']
+            else:
+                res['brechas'] = await self._paso(log, "Paso 8 · Calculando brechas", EST.calcular, plan, rep)
+                log.write(self._tabla_brechas(res['brechas']))
+                interp_input = res['brechas']
+            res['interpretacion'] = await self._paso(log, "Paso 8 · Interpretando", RZ.interpretar_brechas, tema, interp_input)
             res['literatura'] = await self._paso(log, "Paso 9 · Literatura (web)", RZ.contraste_literatura, tema, res['interpretacion'])
             res['puntuacion'] = await self._paso(log, "Paso 10 · Puntuación", RZ.puntuar, tema, res['interpretacion'], res['literatura'], res['analisis'])
             log.write(self._ficha(res))
@@ -406,6 +441,7 @@ class ENAHOApp(App):
             pdf_out = os.path.join('salidas', 'fichas', slug(tema.get('tema', 'tema')) + '.pdf')
             await asyncio.to_thread(FICHA.generar_ficha_pdf, res, cat, pdf_out)
             self._busy = None
+            self._refresh_status()   # que la barra no siga mostrando ⏳ durante el modal
             log.write(f"[green]Ficha PDF:[/] {pdf_out}")
             log.write(f"[green]Propuesta:[/] temas/{os.path.basename(d)}/propuesta.json")
             self.notify("Propuesta lista 🎉 — ficha PDF en salidas/fichas/", title="ENAHO", timeout=7)
@@ -441,6 +477,31 @@ class ENAHOApp(App):
                 continue
             gs = "  ".join(f"{g['etiqueta']}={g['valor']:,.0f}" for g in r.get('grupos', [])[:4])
             t.add_row(r.get('brecha', ''), gs, str(r.get('brecha_relativa_pct', '—')))
+        return t
+
+    def _tabla_evolucion(self, por_anio):
+        anios = sorted(por_anio)
+        nombres = []
+        for y in anios:
+            for r in por_anio[y]:
+                if r.get('brecha') and r['brecha'] not in nombres:
+                    nombres.append(r['brecha'])
+        t = Table(title="Paso 8 · Evolución de brechas por año (brecha relativa %)",
+                  box=box.SIMPLE, title_style="bold cyan")
+        t.add_column("Brecha")
+        for y in anios:
+            t.add_column(y, justify="right")
+        for nom in nombres:
+            fila = [nom]
+            for y in anios:
+                r = next((x for x in por_anio[y] if x.get('brecha') == nom), None)
+                if r is None:
+                    fila.append("—")
+                elif r.get('error'):
+                    fila.append("[red]err[/]")
+                else:
+                    fila.append(str(r.get('brecha_relativa_pct', '—')))
+            t.add_row(*fila)
         return t
 
     def _ficha(self, res):

@@ -1,6 +1,6 @@
 ---
 name: documentar_enaho
-description: Genera un PDF "documentacion_enaho_añoXXXX.pdf" que documenta cada módulo de la ENAHO (carpeta modulos/ de ordenar_enaho): título oficial del diccionario INEI, unidad de análisis, unidad de identificación VERIFICADA (llave mínima única) y, para módulos con varios archivos, en qué se diferencian nombrando sus variables propias (ej. 602/602a/602b). Ejecuta scripts/generar_documentacion_pdf.py.
+description: Genera un PDF "salidas/<año>/documentacion_enaho_<año>.pdf" que documenta cada módulo de la ENAHO (carpeta modulos/ de ordenar_enaho): título oficial del diccionario INEI, unidad de análisis, unidad de identificación VERIFICADA (llave mínima única) y, para módulos con varios archivos, en qué se diferencian nombrando sus variables propias (ej. 602/602a/602b). Ejecuta scripts/generar_documentacion_pdf.py.
 tools: Bash, Read, Glob
 model: sonnet
 ---
@@ -11,7 +11,7 @@ Generas el **PDF de documentación por año** de la ENAHO ejecutando el script d
 
 ## Qué produce
 
-`documentacion_enaho_año<AÑO>.pdf` dentro de cada `by_year/<AÑO>/`, con:
+`salidas/<AÑO>/documentacion_enaho_<AÑO>.pdf` (carpeta visible en la raíz del proyecto; un PDF por año), con:
 - Portada + tabla resumen de todos los módulos.
 - Ficha por módulo: título oficial, **unidad de análisis**, **unidad de identificación verificada** (llave mínima única ✓/✗), filas/columnas/delimitador.
 - Sección **"Diferencias entre archivos del mismo módulo"**: por archivo, en qué consiste + cobertura de hogares + sus **variables propias** (columnas que solo están en ese archivo).

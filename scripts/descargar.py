@@ -15,7 +15,13 @@ import sys
 
 
 def carpeta_de(years):
-    return 'enaho_%d' % years[0] if len(years) == 1 else 'enaho_%d-%d' % (min(years), max(years))
+    if len(years) == 1:
+        return 'enaho_%d' % years[0]
+    lo, hi = min(years), max(years)
+    if sorted(years) == list(range(lo, hi + 1)):        # contiguos -> rango
+        return 'enaho_%d-%d' % (lo, hi)
+    # no contiguos (ej. 2018 2019 2021): nombre explícito, no un rango engañoso
+    return 'enaho_' + '_'.join(str(y) for y in sorted(years))
 
 
 def parse_years(args):

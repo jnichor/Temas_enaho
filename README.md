@@ -50,7 +50,7 @@ Se abre la TUI (full-screen). Navega con teclado o mouse:
 - **5 ▶ Proponer tema** — el flujo estrella: corre los pasos 5→10 y entrega la ficha
 - **v** Ver propuestas guardadas · **c** Regenerar catálogo · **q** Salir
 
-> Versión clásica (menú Rich, sin full-screen) disponible en `sistema_enaho_clasico.py`.
+Las salidas (documentación PDF, visor HTML y fichas de investigación) se escriben en `salidas/<año>/` y `salidas/fichas/`.
 
 ---
 
@@ -58,7 +58,6 @@ Se abre la TUI (full-screen). Navega con teclado o mouse:
 
 ```
 sistema_enaho.py            # TUI principal (Textual)
-sistema_enaho_clasico.py    # TUI alterna (Rich, menú)
 scripts/
   descargar.py              # paso 1 (PyPeruStats, CSV, corte transversal)
   ordenar.py                # paso 2 (modulos/ + tablas_descripcion/)
@@ -70,7 +69,7 @@ scripts/
 .claude/agents/             # agentes de apoyo (descarga, ordenar, documentar, visor, revisión)
 ```
 
-Los microdatos (`enaho_*/`) y las salidas (`temas/`) **no se versionan** (ver `.gitignore`): son pesados y re-descargables desde el portal del INEI.
+Los microdatos (`enaho_*/`) y las salidas generadas (`salidas/`, `temas/`) **no se versionan** (ver `.gitignore`): son pesados y re-generables.
 
 ---
 

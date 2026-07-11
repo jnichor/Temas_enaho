@@ -1,6 +1,6 @@
 ---
 name: visor_enaho
-description: Genera un visor HTML interactivo "documentacion_enaho_añoXXXX.html" donde cada archivo de la carpeta modulos/ es clickable y, al hacer clic en su nombre, despliega una vista previa de sus datos renderizada con pandas (primeras filas, sin necesidad de Python al abrirlo). Ejecuta scripts/generar_visor_html.py.
+description: Genera un visor HTML interactivo "salidas/<año>/visor_enaho_<año>.html" donde cada archivo de la carpeta modulos/ es clickable y, al hacer clic en su nombre, despliega una vista previa de sus datos renderizada con pandas (primeras filas, sin necesidad de Python al abrirlo). Ejecuta scripts/generar_visor_html.py.
 tools: Bash, Read, Glob
 model: sonnet
 ---
@@ -15,7 +15,7 @@ Un PDF NO puede ejecutar pandas/Python al hacer clic (los visores bloquean accio
 
 ## Qué produce
 
-`documentacion_enaho_año<AÑO>.html` dentro de cada `by_year/<AÑO>/`:
+`salidas/<AÑO>/visor_enaho_<AÑO>.html` (carpeta visible en la raíz del proyecto; un HTML por año):
 - Lista por módulo; cada archivo es un `<details>` clickable.
 - Al hacer clic en el nombre → se despliega:
   - **Detalle del archivo** (panel): qué variables contiene (total, identificación vs contenido, bloques temáticos), **cobertura geográfica** (distritos/departamentos/dominios desde UBIGEO), **cobertura temporal** (año + meses desde MES), **unidad de análisis** + llave verificada, y **calidad/completitud** (% de celdas con dato, columnas sin vacíos, filas duplicadas en la llave). Incluye nota de que un % bajo es normal por saltos de patrón.

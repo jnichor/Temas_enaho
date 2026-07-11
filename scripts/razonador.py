@@ -17,18 +17,43 @@ REGLA = ("Eres un economista investigador experto en la ENAHO del Perú. "
          "Responde SIEMPRE en español y SOLO con JSON válido, sin texto adicional ni ```.")
 
 
+# ---------- asignación de modelo por paso (estrategia "conservador", elegida por el usuario) ----------
+# sonnet: todo lo creativo/de juicio (temas/áreas, análisis, diseño causal, interpretar
+#         brechas, literatura, puntuación) — es donde más importa la calidad.
+# haiku:  SOLO lo más mecánico — elegir de listas ya acotadas por el catálogo
+#         (seleccionar variables, filtros, plan de brechas).
+MODELOS = {
+    'sugerir_areas': 'sonnet', 'sugerir_temas': 'sonnet', 'sugerir_temas_multi': 'sonnet',
+    'analizar_tema': 'sonnet', 'diseno_causal': 'sonnet', 'interpretar_brechas': 'sonnet',
+    'contraste_literatura': 'sonnet', 'puntuar': 'sonnet',
+    'seleccionar_variables': 'haiku', 'sugerir_filtros': 'haiku', 'plan_brechas': 'haiku',
+}
+
+
 # ---------- invocación de Claude (suscripción, headless) ----------
-def ask(prompt, timeout=400, web=False):
+def ask(prompt, timeout=400, web=False, model=None):
     full = REGLA + "\n\n" + prompt
-    cmd = 'claude -p --allowedTools "WebSearch"' if web else 'claude -p'
+    cmd = 'claude -p'
+    if model:
+        cmd += ' --model %s' % model
+    if web:
+        cmd += ' --allowedTools "WebSearch"'
     r = subprocess.run(cmd, input=full, shell=True, cwd=ROOT, env=ENV,
                        capture_output=True, text=True, encoding='utf-8',
                        errors='replace', timeout=timeout)
-    return (r.stdout or '').strip()
+    out = (r.stdout or '').strip()
+    if not out:
+        # sin stdout no hay nada que parsear: reporta la causa REAL (stderr/código),
+        # no el críptico "no se pudo extraer JSON" de antes
+        err = (r.stderr or '').strip()
+        raise RuntimeError(
+            "claude -p no devolvió salida (código %s)%s. ¿Claude Code está instalado y con sesión iniciada?"
+            % (r.returncode, ('; stderr: ' + err[:400]) if err else ''))
+    return out
 
 
-def ask_json(prompt, timeout=400, web=False):
-    raw = ask(prompt, timeout, web=web)
+def ask_json(prompt, timeout=400, web=False, model=None):
+    raw = ask(prompt, timeout, web=web, model=model)
     return _extract_json(raw)
 
 
@@ -51,12 +76,28 @@ def _extract_json(raw):
 
 
 # ---------- catálogo (grounding) ----------
+def _rutas_catalogo(year):
+    # sorted(): si el mismo año existe en varias carpetas enaho_*, la elección es
+    # DETERMINISTA (alfabética) y consistente con estadistica._path.
+    return sorted(glob.glob(os.path.join(ROOT, 'enaho_*', 'microodatos_inei', 'enaho',
+                                         '2_organized', 'by_year', str(year), 'catalogo_%s.json' % year)))
+
+
 def load_catalogo(year):
-    for p in glob.glob(os.path.join(ROOT, 'enaho_*', 'microodatos_inei', 'enaho',
-                                    '2_organized', 'by_year', str(year), 'catalogo_%s.json' % year)):
-        with open(p, encoding='utf-8') as fh:
-            return json.load(fh)
-    return None
+    hits = _rutas_catalogo(year)
+    if not hits:
+        return None
+    with open(hits[0], encoding='utf-8') as fh:
+        return json.load(fh)
+
+
+def carpetas_de_anio(year):
+    """Carpetas enaho_* que contienen catálogo para ese año (>1 = duplicado ambiguo)."""
+    out = []
+    for p in _rutas_catalogo(year):
+        rel = os.path.relpath(p, ROOT)
+        out.append(rel.split(os.sep)[0])
+    return out
 
 
 def años_disponibles():
@@ -162,7 +203,7 @@ def sugerir_temas_multi(mcat, area=None, contexto=None, n=4):
         "Devuelve JSON: [{\"tema\": str, \"pregunta_investigacion\": str, \"justificacion\": str, "
         "\"modulos\": [codigos], \"variables_clave\": [str], \"cobertura_anios\": [años], \"motivo_cobertura\": str}]"
         % (n, foco, extra, ', '.join(años), json.dumps(_compacto_multi(mcat), ensure_ascii=False)))
-    return ask_json(prompt)
+    return ask_json(prompt, model=MODELOS['sugerir_temas_multi'])
 
 
 # ---------- PASO CAUSAL: estrategia de identificación ----------
@@ -181,7 +222,7 @@ def diseno_causal(cat, tema, manifiesto, anios):
         "\"controles\": [str], \"estrategia_identificacion\": str, \"supuestos\": [str], \"amenazas\": [str], "
         "\"nivel_causal\": \"asociacion|causal_debil|causal_fuerte\"}"
         % (', '.join(map(str, anios)), tema.get('tema'), json.dumps(det, ensure_ascii=False)))
-    return ask_json(prompt)
+    return ask_json(prompt, model=MODELOS['diseno_causal'])
 
 
 # ---------- PASO 5A: el sistema propone ÁREAS temáticas al azar ----------
@@ -192,7 +233,7 @@ def sugerir_areas(cat, n=3):
         "Catálogo de módulos disponibles (grounding):\n%s\n\n"
         "Devuelve JSON: [{\"area\": str, \"descripcion\": str, \"modulos_relevantes\": [codigos]}]"
         % (n, cat['anio'], json.dumps(_compacto(cat), ensure_ascii=False)))
-    return ask_json(prompt)
+    return ask_json(prompt, model=MODELOS['sugerir_areas'])
 
 
 # ---------- PASO 5B: sugerencia de temas (dado un área + contexto opcional) ----------
@@ -211,7 +252,7 @@ def sugerir_temas(cat, area=None, contexto=None, n=4):
         "Devuelve JSON: [{\"tema\": str, \"pregunta_investigacion\": str, \"justificacion\": str, "
         "\"modulos\": [codigos], \"variables_clave\": [str]}]"
         % (cat['anio'], foco, extra, json.dumps(_compacto(cat), ensure_ascii=False), n))
-    return ask_json(prompt)
+    return ask_json(prompt, model=MODELOS['sugerir_temas'])
 
 
 # ---------- PASO 6: análisis de los módulos asociados al tema ----------
@@ -227,15 +268,39 @@ def analizar_tema(cat, tema):
         "\"calidad_y_completitud\": str, \"viable\": bool, \"observaciones\": str}"
         % (tema.get('tema'), tema.get('pregunta_investigacion'),
            json.dumps(det, ensure_ascii=False)))
-    return ask_json(prompt)
+    return ask_json(prompt, model=MODELOS['analizar_tema'])  # sonnet: análisis de evidencia (conservador)
 
 
 # ---------- PASO 7: selección de variables ----------
-def seleccionar_variables(cat, tema):
+def _restriccion_multianio(mcat, tema, cob):
+    """Lista (determinista) de variables de los módulos del tema que NO existen en
+    todos los años de cobertura, para que el paso 7 las evite."""
+    if not (mcat and cob) or len(cob) < 2:
+        return ''   # con un solo año, el catálogo del año ya limita las opciones
+    cob = [str(a) for a in cob]
+    mods = {str(m['codigo']).upper(): m for m in mcat['modulos']}
+    parciales = []
+    for c in {str(x).upper() for x in (tema.get('modulos') or [])}:
+        m = mods.get(c)
+        if not m:
+            continue
+        for var, info in m['variables'].items():
+            dispo = sorted(set(info['anios']) & set(cob))
+            if set(cob) - set(info['anios']):
+                parciales.append('%s (solo %s)' % (var, ','.join(dispo) if dispo else 'otros años'))
+    if not parciales:
+        return ''
+    return ("\nREGLA MULTI-AÑO (crítica): el tema cubre los años %s y las variables elegidas deben "
+            "existir en TODOS esos años para que el análisis sea comparable. Estas variables NO "
+            "cumplen — NO las selecciones salvo que sean imprescindibles (y si lo haces, adviértelo "
+            "en 'por_que'): %s\n" % (', '.join(cob), '; '.join(sorted(parciales)[:60])))
+
+
+def seleccionar_variables(cat, tema, mcat=None, cob=None):
     det = _modulos_detalle(cat, tema.get('modulos', []))
     prompt = (
         "PASO 7 — Selección de variables para el tema.\n"
-        "Tema: %s\nPregunta: %s\n\n"
+        "Tema: %s\nPregunta: %s\n%s\n"
         "Variables reales disponibles por módulo:\n%s\n\n"
         "Selecciona las variables necesarias. Usa SOLO nombres que existan arriba. "
         "Incluye SIEMPRE las variables de la llave de identificación (CONGLOME, VIVIENDA, HOGAR y CODPERSO "
@@ -243,8 +308,37 @@ def seleccionar_variables(cat, tema):
         "Asigna un rol a cada una (dependiente / independiente / control / identificacion / ponderador).\n"
         "Devuelve JSON: [{\"archivo\": str, \"variable\": str, \"etiqueta\": str, \"rol\": str, \"por_que\": str}]"
         % (tema.get('tema'), tema.get('pregunta_investigacion'),
+           _restriccion_multianio(mcat, tema, cob),
            json.dumps(det, ensure_ascii=False)))
-    return ask_json(prompt)
+    return ask_json(prompt, model=MODELOS['seleccionar_variables'])
+
+
+def disponibilidad_variables(mcat, cat, manifiesto, cob):
+    """Verificación DETERMINISTA post-paso 7: ¿cada variable del manifiesto existe en
+    TODOS los años de cobertura? Devuelve solo las que faltan en algún año."""
+    cob = [str(a) for a in cob]
+    cod_de = {m['archivo']: str(m['codigo']).upper() for m in cat['modulos']}
+    mods = {str(m['codigo']).upper(): m for m in mcat['modulos']}
+    out = []
+    for v in manifiesto:
+        if not isinstance(v, dict) or not v.get('variable'):
+            continue
+        var = v['variable'].upper()
+        info = None
+        m = mods.get(cod_de.get(v.get('archivo'), ''))
+        if m:
+            info = m['variables'].get(var)
+        if info is None:                      # fallback: buscarla en cualquier módulo
+            for mm in mods.values():
+                if var in mm['variables']:
+                    info = mm['variables'][var]
+                    break
+        anios = sorted(set(info['anios']) & set(cob)) if info else []
+        faltan = [a for a in cob if a not in anios]
+        if faltan:
+            out.append({'variable': var, 'archivo': v.get('archivo'), 'rol': v.get('rol'),
+                        'anios_disponibles': anios, 'faltan_en': faltan})
+    return out
 
 
 # ---------- PLAN DE DATOS: filtros (IA) + merge (determinista) ----------
@@ -257,7 +351,7 @@ def sugerir_filtros(cat, tema, manifiesto):
         "una variable concreta. Si no hace falta filtrar, devuelve lista vacía.\n"
         "Devuelve JSON: [{\"archivo\": str, \"variable\": str, \"condicion\": str, \"motivo\": str}]"
         % (tema.get('tema'), json.dumps(det, ensure_ascii=False)))
-    return ask_json(prompt)
+    return ask_json(prompt, model=MODELOS['sugerir_filtros'])
 
 
 def plan_de_datos(cat, tema, manifiesto, filtros):
@@ -316,7 +410,8 @@ def plan_brechas(cat, tema, manifiesto):
         "- grupo: una variable CATEGÓRICA de pocas categorías (sexo, área, dominio, etc.) con su archivo "
         "y un mapa 'etiquetas' {codigo: etiqueta} según el diccionario (ej. P207: {\"1\":\"Hombre\",\"2\":\"Mujer\"}).\n"
         "- ponderador: una variable de factor de expansión existente (ej. FACTOR07) con su archivo (o null).\n"
-        "- estadistico: 'media' o 'mediana' (prefiere 'mediana' para ingresos/gastos: es robusta a valores extremos).\n"
+        "- estadistico: 'media' o 'mediana' (prefiere 'mediana' para ingresos/gastos: es robusta a valores extremos; "
+        "el motor limpia centinelas de 5+ nueves, pero códigos de missing de 4 dígitos como 9999 NO se limpian).\n"
         "Cada brecha = UNA variable de grupo con sus categorías (el motor agrupa por ella). "
         "NO crees brechas 'filtradas' (ej. 'solo urbano'): usa la variable de área como grupo y obtendrás urbano y rural juntas. "
         "Cada brecha debe usar un grupo DISTINTO (sexo, área, dominio, nivel educativo, etc.).\n"
@@ -326,20 +421,21 @@ def plan_brechas(cat, tema, manifiesto):
         "\"hipotesis\": str}]"
         % (tema.get('tema'), json.dumps(manifiesto, ensure_ascii=False),
            json.dumps(det, ensure_ascii=False)))
-    return ask_json(prompt)
+    return ask_json(prompt, model=MODELOS['plan_brechas'])
 
 
 # ---------- PASO 8b: interpretación de los números REALES ----------
 def interpretar_brechas(tema, resultados):
     prompt = (
         "PASO 8 (interpretación) — Estos son RESULTADOS REALES calculados sobre los microdatos "
-        "(medias/medianas ponderadas por grupo y brechas). Interprétalos con rigor; NO inventes "
-        "cifras nuevas, usa solo estas.\n"
+        "(medias/medianas ponderadas por grupo y brechas). Si vienen desglosados POR AÑO, analiza "
+        "también la EVOLUCIÓN temporal de cada brecha (¿crece, cae, estable?). Interprétalos con "
+        "rigor; NO inventes cifras nuevas, usa solo estas.\n"
         "Tema: %s\nResultados:\n%s\n\n"
         "Devuelve JSON: {\"hallazgos\": [str], \"brechas_relevantes\": [str], "
         "\"anomalias\": [str], \"limitaciones\": [str]}"
         % (tema.get('tema'), json.dumps(resultados, ensure_ascii=False)))
-    return ask_json(prompt)
+    return ask_json(prompt, model=MODELOS['interpretar_brechas'])
 
 
 # ---------- PASO 9: contraste con literatura y antecedentes (con WEB) ----------
@@ -356,7 +452,7 @@ def contraste_literatura(tema, brechas):
         "Devuelve JSON: {\"que_se_sabe\": [str], \"vacios_oportunidad\": [str], "
         "\"referencias\": [{\"titulo\": str, \"url\": str, \"aporte\": str}], \"nivel_certeza\": str}"
         % (tema.get('tema'), json.dumps(brechas, ensure_ascii=False)))
-    return ask_json(prompt, timeout=500, web=True)
+    return ask_json(prompt, timeout=500, web=True, model=MODELOS['contraste_literatura'])
 
 
 # ---------- PASO 10: puntuación ----------
@@ -373,7 +469,7 @@ def puntuar(tema, brechas, literatura, factibilidad):
         "\"puntaje_total\": num, \"veredicto\": str}"
         % (tema.get('tema'), json.dumps(brechas, ensure_ascii=False),
            json.dumps(literatura, ensure_ascii=False), json.dumps(factibilidad, ensure_ascii=False)))
-    return ask_json(prompt)
+    return ask_json(prompt, model=MODELOS['puntuar'])
 
 
 if __name__ == '__main__':
