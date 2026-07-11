@@ -46,10 +46,12 @@ def carpetas_enaho():
     return sorted(d for d in glob.glob(os.path.join(ROOT, 'enaho_*')) if os.path.isdir(d))
 
 
-def estado_global():
-    cs = [os.path.basename(c) for c in carpetas_enaho()]
-    años, org, doc, cat = set(), False, False, False
+def info_carpetas():
+    """Detalle POR carpeta enaho_* (a diferencia de estado_global(), que agrega todo)."""
+    out = []
     for c in carpetas_enaho():
+        nombre = os.path.basename(c)
+        años, org, doc, cat = set(), False, False, False
         by = os.path.join(c, 'microodatos_inei', 'enaho', '2_organized', 'by_year')
         if os.path.isdir(by):
             for y in sorted(os.listdir(by)):
@@ -63,7 +65,18 @@ def estado_global():
                 doc = doc or bool(glob.glob(os.path.join(sal, '*.pdf')) or glob.glob(os.path.join(sal, '*.html'))
                                   or glob.glob(os.path.join(yd, '*.pdf')) or glob.glob(os.path.join(yd, '*.html')))
                 cat = cat or bool(glob.glob(os.path.join(yd, 'catalogo_*.json')))
-    return cs, sorted(años), org, doc, cat
+        out.append({'nombre': nombre, 'anios': sorted(años), 'organizado': org, 'documentado': doc, 'catalogado': cat})
+    return out
+
+
+def estado_global():
+    infos = info_carpetas()
+    cs = [i['nombre'] for i in infos]
+    años = sorted(set().union(*(set(i['anios']) for i in infos))) if infos else []
+    org = any(i['organizado'] for i in infos)
+    doc = any(i['documentado'] for i in infos)
+    cat = any(i['catalogado'] for i in infos)
+    return cs, años, org, doc, cat
 
 
 def slug(s):
@@ -199,6 +212,7 @@ class ENAHOApp(App):
     #lst Label { width: 1fr; }
     """
     BINDINGS = [
+        Binding("f", "carpetas", "Carpeta de datos"),
         Binding("1", "descargar", "Descargar"),
         Binding("2", "organizar", "Organizar"),
         Binding("3", "documentar", "Documentar"),
@@ -214,6 +228,7 @@ class ENAHOApp(App):
         with Horizontal():
             with VerticalScroll(id="sidebar"):
                 yield Static("① SISTEMA · Preparación", classes="lane sys")
+                yield Button("📁 Carpeta de datos", id="carpetas")
                 yield Button("1 · Descargar data", id="descargar")
                 yield Button("2 · Organizar", id="organizar")
                 yield Button("3·4 · Documentar (PDF+HTML)", id="documentar")
@@ -229,9 +244,11 @@ class ENAHOApp(App):
         yield Footer()
 
     _busy = None  # texto de la tarea en curso, o None si libre
+    _carpeta_activa = None  # None = trabajar con TODAS las carpetas enaho_* mezcladas
 
     def on_mount(self):
         self._busy = None
+        self._carpeta_activa = None
         self._refresh_status()
         log = self.query_one("#log", RichLog)
         log.write(Panel(
@@ -240,6 +257,8 @@ class ENAHOApp(App):
             "[bold #f0b429]5 ▶ Proponer tema[/]: corre los pasos 5–10 con tu suscripción "
             "de Claude y te entrega el tema, variables, merge/filtros y puntuación.",
             border_style="#2ec4d6", box=box.ROUNDED))
+        if len(carpetas_enaho()) > 1:
+            self.action_carpetas()   # varias carpetas detectadas: pregunta con cuál trabajar
 
     def _refresh_status(self):
         if self._busy:
@@ -247,8 +266,9 @@ class ENAHOApp(App):
             return
         cs, años, org, doc, cat = estado_global()
         ok = lambda b: "[green]✓[/]" if b else "[red]✗[/]"
+        activa = f" ·   carpeta: [b]{self._carpeta_activa or 'todas'}[/]" if len(cs) > 1 else ""
         txt = (f" Datos: {', '.join(cs) or '—'}   ·   años: {', '.join(años) or '—'}   ·   "
-               f"organizado {ok(org)}  documentado {ok(doc)}  catálogo {ok(cat)}") if cs else \
+               f"organizado {ok(org)}  documentado {ok(doc)}  catálogo {ok(cat)}{activa}") if cs else \
               " Sin datos aún — empieza por [b]1 · Descargar[/]"
         self.query_one("#status", Static).update(txt)
 
@@ -275,6 +295,35 @@ class ENAHOApp(App):
 
     def action_limpiar(self):
         self.query_one("#log", RichLog).clear()
+
+    @work(exclusive=True)
+    async def action_carpetas(self):
+        """Home de datos: elegir con qué carpeta enaho_* trabajar, ver su estado,
+        o saltar directo a descargar una nueva. Filtra qué años/catálogos se usan
+        en el Paso 5 (Proponer tema) para no mezclar fuentes sin que el usuario elija."""
+        log = self.query_one("#log", RichLog)
+        infos = info_carpetas()
+        if not infos:
+            log.write("[yellow]Aún no hay ninguna carpeta enaho_* descargada. Usa 1 · Descargar.[/]")
+            return
+        ok = lambda b: "✓" if b else "✗"
+        opciones = []
+        for i in infos:
+            rango = f"{i['anios'][0]}–{i['anios'][-1]}" if len(i['anios']) > 1 else (i['anios'][0] if i['anios'] else '—')
+            opciones.append((f"📁 {i['nombre']}   ·   años {rango}   ·   organizado {ok(i['organizado'])}  "
+                             f"documentado {ok(i['documentado'])}  catálogo {ok(i['catalogado'])}", i['nombre']))
+        opciones.append(("➕ Descargar una carpeta nueva (otro año o rango)", '__nueva__'))
+        if len(infos) > 1:
+            opciones.append(("▤ Trabajar con TODAS las carpetas mezcladas", '__todas__'))
+        pick = await self.push_screen_wait(SelectScreen("¿Con qué datos quieres trabajar?", opciones))
+        if pick is None:
+            return
+        if pick == '__nueva__':
+            self.action_descargar()
+            return
+        self._carpeta_activa = None if pick == '__todas__' else pick
+        self._refresh_status()
+        log.write(f"[green]✓ Carpeta activa:[/] {self._carpeta_activa or 'todas'}")
 
     # ---------- pasos 1–4 (scripts en SECUENCIA, un solo hilo) ----------
     @work(thread=True, exclusive=True)
@@ -348,9 +397,12 @@ class ENAHOApp(App):
     @work(exclusive=True)
     async def action_proponer(self):
         log = self.query_one("#log", RichLog)
-        años = RZ.años_disponibles()
+        carp = self._carpeta_activa
+        años = RZ.años_disponibles(carp)
         if not años:
-            log.write("[red]No hay catálogo. Corre primero 3·4 Documentar o c Catálogo.[/]")
+            msg = (f"No hay catálogo en la carpeta '{carp}'." if carp else "No hay catálogo.")
+            log.write(f"[red]{msg} Corre primero 3·4 Documentar o c Catálogo, "
+                      f"o elige otra carpeta con 📁 Carpeta de datos.[/]")
             return
         sel_anios = [años[0]] if len(años) == 1 else await self.push_screen_wait(YearMultiScreen(años))
         if not sel_anios:
@@ -361,17 +413,20 @@ class ENAHOApp(App):
         modo, area, contexto = ar
 
         res = {'anios': sel_anios, 'tema': None}
-        for y in sel_anios:   # aviso: el mismo año en varias carpetas = fuente ambigua
-            carps = RZ.carpetas_de_anio(y)
-            if len(carps) > 1:
-                log.write(f"[yellow]⚠ El año {y} existe en {len(carps)} carpetas "
-                          f"({', '.join(carps)}); se usará '{carps[0]}'. "
-                          f"Elimina duplicados para no mezclar fuentes.[/]")
+        if carp:
+            log.write(f"[#2ec4d6]· Trabajando con la carpeta activa:[/] {carp}")
+        else:
+            for y in sel_anios:   # aviso: el mismo año en varias carpetas = fuente ambigua
+                carps = RZ.carpetas_de_anio(y)
+                if len(carps) > 1:
+                    log.write(f"[yellow]⚠ El año {y} existe en {len(carps)} carpetas "
+                              f"({', '.join(carps)}); se usará '{carps[0]}'. "
+                              f"Elimina duplicados o elige una carpeta específica con 📁 Carpeta de datos.[/]")
         try:
             self._set_busy("Cargando catálogo multi-año")
-            mcat = await asyncio.to_thread(RZ.catalogo_multianio, sel_anios)
+            mcat = await asyncio.to_thread(RZ.catalogo_multianio, sel_anios, carp)
             rep = sel_anios[-1]
-            cat = await asyncio.to_thread(RZ.load_catalogo, rep)
+            cat = await asyncio.to_thread(RZ.load_catalogo, rep, carp)
             self._busy = None
             self._refresh_status()   # que la barra no siga mostrando ⏳ durante el modal
             if not mcat or not cat:
@@ -406,7 +461,7 @@ class ENAHOApp(App):
             # en orden ascendente; tomar el último elemento a ciegas podía usar como año
             # representativo uno que NO es el más reciente de la cobertura real.
             rep = max(cob) if cob else rep
-            cat = await asyncio.to_thread(RZ.load_catalogo, rep)
+            cat = await asyncio.to_thread(RZ.load_catalogo, rep, carp)
             log.write(Panel(f"[bold]{tema.get('tema')}[/]\n[dim]{tema.get('pregunta_investigacion','')}[/]\n"
                             f"[#2ec4d6]Cobertura:[/] {', '.join(cob)} — {tema.get('motivo_cobertura', '')}",
                             title="Tema elegido", border_style="#f0b429"))
@@ -435,11 +490,11 @@ class ENAHOApp(App):
             res['filtros'] = await self._paso(log, "Plan de datos · filtros", RZ.sugerir_filtros, cat, tema, res['manifiesto'])
             res['plan_datos'] = RZ.plan_de_datos(cat, tema, res['manifiesto'], res['filtros'])
             log.write(self._panel_plan(res['plan_datos']))
-            res['verificacion_merge'] = await self._paso(log, "Plan de datos · verificar merge", EST.verificar_merge, res['plan_datos'], rep)
+            res['verificacion_merge'] = await self._paso(log, "Plan de datos · verificar merge", EST.verificar_merge, res['plan_datos'], rep, carp)
             for vm in res['verificacion_merge']:
                 mk = "[green]✓[/]" if vm.get('ok') else "[red]⚠[/]"
                 log.write(f"  {mk} {vm.get('archivo')}: {vm.get('nota')}")
-            res['consolidacion'] = await self._paso(log, "Plan de datos · consolidación", EST.revisar_consolidacion, cat, res['manifiesto'], rep)
+            res['consolidacion'] = await self._paso(log, "Plan de datos · consolidación", EST.revisar_consolidacion, cat, res['manifiesto'], rep, carp)
             await self._guardar(res)
             plan = await self._paso(log, "Paso 8 · Planificando brechas", RZ.plan_brechas, cat, tema, res['manifiesto'])
             res['plan_brechas'] = plan   # se guarda para poder diagnosticar sin adivinar si algo falla
@@ -447,13 +502,13 @@ class ENAHOApp(App):
             if len(cob) > 1:
                 res['brechas_por_anio'] = await self._paso(
                     log, "Paso 8 · Calculando brechas en %d años" % len(cob),
-                    EST.calcular_multi, plan, cob, rep)
+                    EST.calcular_multi, plan, cob, rep, carp)
                 res['brechas'] = res['brechas_por_anio'].get(str(rep)) or []
                 log.write(self._tabla_brechas(res['brechas']))
                 log.write(self._tabla_evolucion(res['brechas_por_anio']))
                 interp_input = res['brechas_por_anio']
             else:
-                res['brechas'] = await self._paso(log, "Paso 8 · Calculando brechas", EST.calcular, plan, rep)
+                res['brechas'] = await self._paso(log, "Paso 8 · Calculando brechas", EST.calcular, plan, rep, carp)
                 log.write(self._tabla_brechas(res['brechas']))
                 interp_input = res['brechas']
             await self._guardar(res)

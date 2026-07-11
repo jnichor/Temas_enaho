@@ -38,10 +38,13 @@ SENTINELA = r'^\s*-?9{5,}(\.\d*)?\s*$'
 
 
 # ----------------------------- acceso a archivos -----------------------------
-def _path(archivo, year):
+def _path(archivo, year, carpeta=None):
     # sorted(): resolución DETERMINISTA cuando el mismo año existe en varias
-    # carpetas enaho_* (misma regla que razonador.load_catalogo).
-    hits = sorted(glob.glob(os.path.join('enaho_*', 'microodatos_inei', 'enaho', '2_organized',
+    # carpetas enaho_* (misma regla que razonador.load_catalogo). `carpeta` acota
+    # la búsqueda a la carpeta activa elegida en el TUI, para no leer datos de una
+    # carpeta distinta a la del catálogo que originó el plan.
+    base = carpeta if carpeta else 'enaho_*'
+    hits = sorted(glob.glob(os.path.join(base, 'microodatos_inei', 'enaho', '2_organized',
                                          'by_year', str(year), 'modulos', archivo)))
     return hits[0] if hits else None
 
@@ -52,9 +55,9 @@ def _sniff(path):
     return ';' if l.count(';') > l.count(',') else ','
 
 
-def _scan(archivo, year):
+def _scan(archivo, year, carpeta=None):
     """LazyFrame en streaming con columnas normalizadas a MAYÚSCULAS. No lee datos aún."""
-    path = _path(archivo, year)
+    path = _path(archivo, year, carpeta)
     if not path:
         raise FileNotFoundError(archivo)
     lf = pl.scan_csv(path, separator=_sniff(path), infer_schema_length=0,
@@ -84,7 +87,7 @@ def _weighted_median(x, w):
 
 
 # ----------------------------- una brecha -----------------------------
-def _una_brecha(item, year):
+def _una_brecha(item, year, carpeta=None):
     ov = item['outcome']['variable'].upper()
     gv = item['grupo']['variable'].upper()
     et = {str(k): v for k, v in (item['grupo'].get('etiquetas') or {}).items()}
@@ -92,7 +95,7 @@ def _una_brecha(item, year):
     arch_o = item['outcome']['archivo']
     arch_g = item['grupo']['archivo']
 
-    lo = _scan(arch_o, year)
+    lo = _scan(arch_o, year, carpeta)
     co = _cols(lo)
     if ov not in co:
         raise ValueError("outcome %s no existe en %s" % (ov, arch_o))
@@ -102,7 +105,7 @@ def _una_brecha(item, year):
     p = item.get('ponderador') or {}
     warch = p.get('archivo') or arch_o
     wv = (p.get('variable') or '').upper() or None
-    w_cols = co if warch == arch_o else _cols(_scan(warch, year))
+    w_cols = co if warch == arch_o else _cols(_scan(warch, year, carpeta))
     notas_iniciales = []
     if wv and wv in w_cols:
         wname = wv
@@ -128,7 +131,7 @@ def _una_brecha(item, year):
 
     # --- grupo desde OTRO archivo: validar NIVELES (m:1) antes de unir ---
     if arch_g != arch_o:
-        lg = _scan(arch_g, year)
+        lg = _scan(arch_g, year, carpeta)
         cg = _cols(lg)
         if gv not in cg:
             raise ValueError("variable de grupo %s no existe en %s" % (gv, arch_g))
@@ -146,7 +149,7 @@ def _una_brecha(item, year):
 
     # --- peso desde OTRO archivo ---
     if wname and warch != arch_o:
-        lw = _scan(warch, year)
+        lw = _scan(warch, year, carpeta)
         cw_ = _cols(lw)
         wk = [k for k in KEYS4 if k in _cols(lf) and k in cw_]
         if wk:
@@ -225,11 +228,11 @@ def _una_brecha(item, year):
     return out
 
 
-def calcular(plan, year):
+def calcular(plan, year, carpeta=None):
     res = []
     for item in plan:
         try:
-            res.append(_una_brecha(item, year))
+            res.append(_una_brecha(item, year, carpeta))
         except Exception as e:
             res.append({'brecha': item.get('brecha'), 'anio': str(year), 'error': str(e)})
     return res
@@ -249,20 +252,20 @@ def _plan_para_anio(plan, rep, year):
     return p2
 
 
-def calcular_multi(plan, anios, rep):
+def calcular_multi(plan, anios, rep, carpeta=None):
     """Ejecuta el MISMO plan de brechas en cada año de cobertura (evolución temporal).
     Los años sin archivo/variable quedan como error explícito, no rompen el resto."""
-    return {str(y): calcular(_plan_para_anio(plan, rep, y), y) for y in anios}
+    return {str(y): calcular(_plan_para_anio(plan, rep, y), y, carpeta) for y in anios}
 
 
 # ----------------------------- verificaciones -----------------------------
-def _nfilas(arch, year):
-    return int(_scan(arch, year).select(pl.len()).collect(engine='streaming').item())
+def _nfilas(arch, year, carpeta=None):
+    return int(_scan(arch, year, carpeta).select(pl.len()).collect(engine='streaming').item())
 
 
-def _overlap_match(arch_a, arch_b, var, year):
+def _overlap_match(arch_a, arch_b, var, year, carpeta=None):
     """% de coincidencia de 'var' entre dos módulos en su población común (streaming)."""
-    la, lb = _scan(arch_a, year), _scan(arch_b, year)
+    la, lb = _scan(arch_a, year, carpeta), _scan(arch_b, year, carpeta)
     ca, cb = _cols(la), _cols(lb)
     if var not in ca or var not in cb:
         return None, 0
@@ -279,7 +282,7 @@ def _overlap_match(arch_a, arch_b, var, year):
     return float(r['pct'][0]), n
 
 
-def revisar_consolidacion(cat, manifiesto, year):
+def revisar_consolidacion(cat, manifiesto, year, carpeta=None):
     """Fuente canónica por defecto + aviso de consolidación VERIFICADA.
     Para cada módulo secundario del merge, revisa si sus variables seleccionadas
     también están en el módulo base y si son idénticas en el overlap. Marca:
@@ -294,7 +297,7 @@ def revisar_consolidacion(cat, manifiesto, year):
     if not archivos:
         return {}
     base = max(archivos, key=lambda a: len(by_file[a]))
-    cob = {a: _nfilas(a, year) for a in archivos}
+    cob = {a: _nfilas(a, year, carpeta) for a in archivos}
     rep = {'base': base, 'coberturas': cob, 'modulos': [], 'consolidables': []}
     for a in archivos:
         if a == base:
@@ -304,7 +307,7 @@ def revisar_consolidacion(cat, manifiesto, year):
             if var in {'CONGLOME', 'VIVIENDA', 'HOGAR', 'CODPERSO'}:
                 continue
             if var in cols_de.get(base, set()):
-                pct, n = _overlap_match(a, base, var, year)
+                pct, n = _overlap_match(a, base, var, year, carpeta)
                 if pct is None:
                     prop.append(var)
                 elif pct >= 99.5:
@@ -327,7 +330,7 @@ def revisar_consolidacion(cat, manifiesto, year):
     return rep
 
 
-def verificar_merge(plan, year):
+def verificar_merge(plan, year, carpeta=None):
     """Verifica que cada paso de merge sea válido: si es broadcast hogar→persona,
     la llave de hogar debe ser ÚNICA en ese archivo (1 fila por hogar) para no inflar filas."""
     HH = ['CONGLOME', 'VIVIENDA', 'HOGAR']
@@ -340,7 +343,7 @@ def verificar_merge(plan, year):
                         'nota': 'merge directo (misma unidad de análisis), sin replicación'})
             continue
         try:
-            lf = _scan(p['archivo'], year)
+            lf = _scan(p['archivo'], year, carpeta)
             hh = [k for k in HH if k in _cols(lf)]
             r = lf.select(pl.len().alias('n'),
                           pl.struct(hh).n_unique().alias('u')).collect(engine='streaming')

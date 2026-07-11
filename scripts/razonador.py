@@ -76,15 +76,18 @@ def _extract_json(raw):
 
 
 # ---------- catálogo (grounding) ----------
-def _rutas_catalogo(year):
-    # sorted(): si el mismo año existe en varias carpetas enaho_*, la elección es
-    # DETERMINISTA (alfabética) y consistente con estadistica._path.
-    return sorted(glob.glob(os.path.join(ROOT, 'enaho_*', 'microodatos_inei', 'enaho',
+def _rutas_catalogo(year, carpeta=None):
+    # sorted(): si el mismo año existe en varias carpetas enaho_* Y no se pidió una
+    # carpeta concreta, la elección es DETERMINISTA (alfabética), consistente con
+    # estadistica._path. `carpeta` (ej. "enaho_2015-2020") acota la búsqueda a esa
+    # carpeta específica, la que el usuario eligió como "carpeta activa" en el TUI.
+    base = carpeta if carpeta else 'enaho_*'
+    return sorted(glob.glob(os.path.join(ROOT, base, 'microodatos_inei', 'enaho',
                                          '2_organized', 'by_year', str(year), 'catalogo_%s.json' % year)))
 
 
-def load_catalogo(year):
-    hits = _rutas_catalogo(year)
+def load_catalogo(year, carpeta=None):
+    hits = _rutas_catalogo(year, carpeta)
     if not hits:
         return None
     with open(hits[0], encoding='utf-8') as fh:
@@ -100,9 +103,10 @@ def carpetas_de_anio(year):
     return out
 
 
-def años_disponibles():
+def años_disponibles(carpeta=None):
+    base = carpeta if carpeta else 'enaho_*'
     años = []
-    for p in glob.glob(os.path.join(ROOT, 'enaho_*', 'microodatos_inei', 'enaho',
+    for p in glob.glob(os.path.join(ROOT, base, 'microodatos_inei', 'enaho',
                                     '2_organized', 'by_year', '*', 'catalogo_*.json')):
         m = re.search(r'catalogo_(\d+)\.json$', p)
         if m:
@@ -135,18 +139,18 @@ def _modulos_detalle(cat, codigos):
 
 
 # ---------- MULTI-AÑO: grounding con disponibilidad de variables por año ----------
-def load_catalogos(anios):
+def load_catalogos(anios, carpeta=None):
     out = []
     for a in anios:
-        c = load_catalogo(str(a))
+        c = load_catalogo(str(a), carpeta)
         if c:
             out.append((str(a), c))
     return out
 
 
-def catalogo_multianio(anios):
+def catalogo_multianio(anios, carpeta=None):
     """Une los catálogos de varios años. Para cada variable registra en qué AÑOS existe."""
-    cats = load_catalogos(anios)
+    cats = load_catalogos(anios, carpeta)
     if not cats:
         return None
     años = [a for a, _ in cats]
