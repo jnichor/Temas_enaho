@@ -397,7 +397,11 @@ def plan_de_datos(cat, tema, manifiesto, filtros):
     archivos = list(by_file)
     persona = any('CODPERSO' in (llave_de.get(a) or []) for a in archivos)
     llaves_merge = ['CONGLOME', 'VIVIENDA', 'HOGAR'] + (['CODPERSO'] if persona else [])
-    base = max(archivos, key=lambda a: len(by_file[a])) if archivos else None
+    # el base DEBE tener TODAS las llaves_merge (mismo nivel que el análisis, o más fino):
+    # si el análisis es a nivel persona, un archivo de nivel hogar (sin CODPERSO) no puede
+    # ser base, porque los demás archivos de persona no tendrían con qué unirse a él.
+    candidatos = [a for a in archivos if set(llaves_merge) <= set(llave_de.get(a) or [])] or archivos
+    base = max(candidatos, key=lambda a: len(by_file[a])) if candidatos else None
     nivel_analisis = 'persona' if persona else 'hogar'
     pasos, explicacion = [], []
     for a in sorted(archivos, key=lambda a: (a != base, a)):

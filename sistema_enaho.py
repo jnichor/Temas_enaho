@@ -402,7 +402,10 @@ class ENAHOApp(App):
             res['tema'] = tema
             cob = [str(a) for a in (tema.get('cobertura_anios') or sel_anios)]
             res['cobertura_anios'] = cob
-            rep = cob[-1] if cob else rep
+            # max(), no cob[-1]: 'cobertura_anios' lo devuelve la IA y no viene garantizado
+            # en orden ascendente; tomar el último elemento a ciegas podía usar como año
+            # representativo uno que NO es el más reciente de la cobertura real.
+            rep = max(cob) if cob else rep
             cat = await asyncio.to_thread(RZ.load_catalogo, rep)
             log.write(Panel(f"[bold]{tema.get('tema')}[/]\n[dim]{tema.get('pregunta_investigacion','')}[/]\n"
                             f"[#2ec4d6]Cobertura:[/] {', '.join(cob)} — {tema.get('motivo_cobertura', '')}",
