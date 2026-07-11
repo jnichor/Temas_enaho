@@ -150,11 +150,17 @@ def _una_brecha(item, year):
             wname = None
 
     # --- limpieza + colecta SOLO de [grupo, outcome, peso] (streaming) ---
+    # normaliza coma decimal -> punto ANTES de castear: algunos años/archivos de la
+    # ENAHO usan ';' como separador de columnas Y ',' como separador decimal
+    # (ej. 609-2025: "1203,07678222656"); sin esto, cast(Float64) los vuelve NULL
+    # en silencio y toda la brecha sale vacía sin ningún error visible.
+    lf = lf.with_columns(pl.col(ov).str.replace(',', '.', literal=True).alias(ov))
     lf = lf.with_columns(
         pl.when(pl.col(ov).str.contains(SENTINELA)).then(pl.lit(None)).otherwise(pl.col(ov)).alias(ov))
     lf = lf.with_columns(pl.col(ov).cast(pl.Float64, strict=False).alias('_y'))
     if wname:
-        lf = lf.with_columns(pl.col(wname).cast(pl.Float64, strict=False).fill_null(0.0).alias('_w'))
+        lf = lf.with_columns(pl.col(wname).str.replace(',', '.', literal=True)
+                             .cast(pl.Float64, strict=False).fill_null(0.0).alias('_w'))
     else:
         lf = lf.with_columns(pl.lit(1.0).alias('_w'))
     lf = (lf.drop_nulls(['_y'])
@@ -162,7 +168,7 @@ def _una_brecha(item, year):
             .filter(pl.col(gv).str.strip_chars() != ''))
     df = lf.select([gv, '_y', '_w']).collect(engine='streaming')
 
-    grupos = []
+    pre_filtro = []   # grupos ANTES del corte n>=30, para poder diagnosticar sin adivinar
     for name, sub in df.group_by(gv):
         g = name[0] if isinstance(name, tuple) else name
         x, w = sub['_y'].to_numpy(), sub['_w'].to_numpy()
@@ -170,9 +176,9 @@ def _una_brecha(item, year):
             val = _weighted_median(x, w)
         else:
             val = float(np.average(x, weights=w)) if w.sum() > 0 else float(np.mean(x))
-        grupos.append({'grupo': str(g), 'etiqueta': et.get(str(g), str(g)),
-                       'valor': round(val, 2), 'n': int(sub.height)})
-    grupos = [gp for gp in grupos if gp['n'] >= 30]   # ignora celdas con muy pocos casos
+        pre_filtro.append({'grupo': str(g), 'etiqueta': et.get(str(g), str(g)),
+                           'valor': round(val, 2), 'n': int(sub.height)})
+    grupos = [gp for gp in pre_filtro if gp['n'] >= 30]   # ignora celdas con muy pocos casos
     grupos.sort(key=lambda d: d['valor'])
     out = {'brecha': item.get('brecha'), 'outcome': ov, 'grupo': gv,
            'estadistico': estad, 'ponderador': wname or 'sin ponderar',
@@ -183,12 +189,29 @@ def _una_brecha(item, year):
         notas.append('%d valores exactamente 9999 en %s: podría ser código de no respuesta '
                      'de 4 dígitos (verificar en el diccionario); se MANTUVIERON en el cálculo — '
                      'la mediana es robusta a esto, la media no' % (n9999, ov))
-    if notas:
-        out['nota'] = ' | '.join(notas)
     vals = [gp['valor'] for gp in grupos]
     if len(vals) >= 2 and min(vals) != 0:
         out['brecha_absoluta'] = round(max(vals) - min(vals), 2)
         out['brecha_relativa_pct'] = round(100 * (max(vals) - min(vals)) / abs(min(vals)), 1)
+    else:
+        # diagnóstico honesto: por qué no se pudo calcular la brecha, sin adivinar
+        descartados = [gp for gp in pre_filtro if gp['n'] < 30]
+        if not pre_filtro:
+            notas.append('sin grupos: el merge outcome↔grupo no produjo ninguna fila '
+                         '(revisar si %s y %s comparten población real en %s)' % (ov, gv, year))
+        elif len(pre_filtro) < 2:
+            notas.append('solo 1 categoría de %s presente en los datos (%s); no hay con qué comparar'
+                         % (gv, pre_filtro[0]['grupo']))
+        elif descartados:
+            notas.append('%d de %d categorías de %s tienen menos de 30 casos y se excluyeron '
+                         '(tamaños: %s); quedaron insuficientes para la brecha'
+                         % (len(descartados), len(pre_filtro), gv,
+                            ', '.join('%s=%d' % (g['grupo'], g['n']) for g in pre_filtro)))
+        elif len(vals) >= 2 and min(vals) == 0:
+            notas.append('el grupo de menor valor dio exactamente 0; la brecha relativa (%) '
+                         'no es calculable con un valor base de 0')
+    if notas:
+        out['nota'] = ' | '.join(notas)
     return out
 
 

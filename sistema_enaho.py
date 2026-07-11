@@ -12,9 +12,11 @@ import sys
 import re
 import json
 import glob
+import datetime
 import asyncio
 import subprocess
 
+from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
 from rich import box
@@ -325,9 +327,17 @@ class ENAHOApp(App):
         if not props:
             self.notify("Aún no hay propuestas guardadas. Corre el paso 5.", severity="warning")
             return
-        pick = await self.push_screen_wait(SelectScreen(
-            "Propuestas guardadas",
-            [(os.path.basename(os.path.dirname(p)).replace('-', ' '), p) for p in props]))
+        opciones = []
+        for p in props:
+            nombre = os.path.basename(os.path.dirname(p)).replace('-', ' ')
+            try:
+                with open(p, encoding='utf-8') as fh:
+                    estado = json.load(fh).get('estado', 'completa')
+            except Exception:
+                estado = '?'
+            marca = '✓' if estado == 'completa' else ('⚠ incompleta' if estado == 'incompleta' else estado)
+            opciones.append((f"{nombre}  [{marca}]", p))
+        pick = await self.push_screen_wait(SelectScreen("Propuestas guardadas", opciones))
         if not pick:
             return
         with open(pick, encoding='utf-8') as fh:
@@ -395,8 +405,10 @@ class ENAHOApp(App):
             log.write(Panel(f"[bold]{tema.get('tema')}[/]\n[dim]{tema.get('pregunta_investigacion','')}[/]\n"
                             f"[#2ec4d6]Cobertura:[/] {', '.join(cob)} — {tema.get('motivo_cobertura', '')}",
                             title="Tema elegido", border_style="#f0b429"))
+            d = self._guardar_progreso(res)   # 1er guardado: ya hay tema+cobertura, aunque falle después
 
             res['analisis'] = await self._paso(log, "Paso 6 · Análisis de módulos", RZ.analizar_tema, cat, tema)
+            self._guardar_progreso(res)
             res['manifiesto'] = await self._paso(log, "Paso 7 · Selección de variables",
                                                  RZ.seleccionar_variables, cat, tema, mcat, cob)
             if len(cob) > 1:   # verificación determinista: cada variable debe existir en TODOS los años
@@ -407,7 +419,9 @@ class ENAHOApp(App):
                                   f"{', '.join(f['faltan_en'])} — esa parte del análisis no cubrirá esos años.[/]")
                 else:
                     log.write("[green]✓ Todas las variables seleccionadas existen en todos los años de cobertura.[/]")
+            self._guardar_progreso(res)
             res['causal'] = await self._paso(log, "Diseño causal · identificación", RZ.diseno_causal, cat, tema, res['manifiesto'], cob)
+            self._guardar_progreso(res)
             res['filtros'] = await self._paso(log, "Plan de datos · filtros", RZ.sugerir_filtros, cat, tema, res['manifiesto'])
             res['plan_datos'] = RZ.plan_de_datos(cat, tema, res['manifiesto'], res['filtros'])
             log.write(self._panel_plan(res['plan_datos']))
@@ -416,7 +430,10 @@ class ENAHOApp(App):
                 mk = "[green]✓[/]" if vm.get('ok') else "[red]⚠[/]"
                 log.write(f"  {mk} {vm.get('archivo')}: {vm.get('nota')}")
             res['consolidacion'] = await self._paso(log, "Plan de datos · consolidación", EST.revisar_consolidacion, cat, res['manifiesto'], rep)
+            self._guardar_progreso(res)
             plan = await self._paso(log, "Paso 8 · Planificando brechas", RZ.plan_brechas, cat, tema, res['manifiesto'])
+            res['plan_brechas'] = plan   # se guarda para poder diagnosticar sin adivinar si algo falla
+            self._guardar_progreso(res)
             if len(cob) > 1:
                 res['brechas_por_anio'] = await self._paso(
                     log, "Paso 8 · Calculando brechas en %d años" % len(cob),
@@ -429,14 +446,14 @@ class ENAHOApp(App):
                 res['brechas'] = await self._paso(log, "Paso 8 · Calculando brechas", EST.calcular, plan, rep)
                 log.write(self._tabla_brechas(res['brechas']))
                 interp_input = res['brechas']
+            self._guardar_progreso(res)
             res['interpretacion'] = await self._paso(log, "Paso 8 · Interpretando", RZ.interpretar_brechas, tema, interp_input)
+            self._guardar_progreso(res)
             res['literatura'] = await self._paso(log, "Paso 9 · Literatura (web)", RZ.contraste_literatura, tema, res['interpretacion'])
+            self._guardar_progreso(res)
             res['puntuacion'] = await self._paso(log, "Paso 10 · Puntuación", RZ.puntuar, tema, res['interpretacion'], res['literatura'], res['analisis'])
             log.write(self._ficha(res))
-            d = os.path.join(ROOT, 'temas', slug(tema.get('tema', 'tema')))
-            os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, 'propuesta.json'), 'w', encoding='utf-8') as fh:
-                json.dump(res, fh, ensure_ascii=False, indent=2)
+            d = self._guardar_progreso(res, estado='completa')
             self._set_busy("Generando ficha PDF")
             pdf_out = os.path.join('salidas', 'fichas', slug(tema.get('tema', 'tema')) + '.pdf')
             await asyncio.to_thread(FICHA.generar_ficha_pdf, res, cat, pdf_out)
@@ -446,10 +463,31 @@ class ENAHOApp(App):
             log.write(f"[green]Propuesta:[/] temas/{os.path.basename(d)}/propuesta.json")
             self.notify("Propuesta lista 🎉 — ficha PDF en salidas/fichas/", title="ENAHO", timeout=7)
         except Exception as ex:
+            d = self._guardar_progreso(res, estado='incompleta', error=str(ex))
             log.write(f"[red]Falló un paso: {ex}[/]")
-            self.notify("Falló el flujo de propuesta", severity="error", timeout=6)
+            if d:
+                log.write(f"[yellow]El progreso hasta este punto quedó guardado en "
+                          f"temas/{os.path.basename(d)}/propuesta.json — no se perdió.[/]")
+            self.notify("Falló el flujo de propuesta" + (" (progreso guardado)" if d else ""),
+                       severity="error", timeout=6)
         finally:
             self._end_busy()
+
+    def _guardar_progreso(self, res, estado='en_progreso', error=None):
+        """Escribe temas/<slug>/propuesta.json en CADA checkpoint (no solo al final),
+        así un corte de cuota/red a mitad de camino no borra el trabajo ya hecho."""
+        tema = res.get('tema') or {}
+        if not tema.get('tema'):
+            return None   # sin tema aún no hay carpeta con la que identificar el progreso
+        res['estado'] = estado
+        res['actualizado'] = datetime.datetime.now().isoformat(timespec='seconds')
+        if error:
+            res['error'] = error
+        d = os.path.join(ROOT, 'temas', slug(tema['tema']))
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'propuesta.json'), 'w', encoding='utf-8') as fh:
+            json.dump(res, fh, ensure_ascii=False, indent=2)
+        return d
 
     async def _paso(self, log, titulo, fn, *args):
         self._set_busy(titulo)
@@ -476,6 +514,8 @@ class ENAHOApp(App):
                 t.add_row(r.get('brecha', ''), f"[red]{r['error']}[/]", "—")
                 continue
             gs = "  ".join(f"{g['etiqueta']}={g['valor']:,.0f}" for g in r.get('grupos', [])[:4])
+            if not gs and r.get('nota'):
+                gs = f"[yellow]{r['nota']}[/]"   # explica el '—' en vez de dejarlo mudo
             t.add_row(r.get('brecha', ''), gs, str(r.get('brecha_relativa_pct', '—')))
         return t
 
@@ -491,6 +531,7 @@ class ENAHOApp(App):
         t.add_column("Brecha")
         for y in anios:
             t.add_column(y, justify="right")
+        notas = []
         for nom in nombres:
             fila = [nom]
             for y in anios:
@@ -499,10 +540,15 @@ class ENAHOApp(App):
                     fila.append("—")
                 elif r.get('error'):
                     fila.append("[red]err[/]")
+                    notas.append(f"[red]{nom} ({y}):[/] {r['error']}")
                 else:
                     fila.append(str(r.get('brecha_relativa_pct', '—')))
+                    if 'brecha_relativa_pct' not in r and r.get('nota'):
+                        notas.append(f"[yellow]{nom} ({y}):[/] {r['nota']}")
             t.add_row(*fila)
-        return t
+        if not notas:
+            return t
+        return Group(t, "\n".join(notas))
 
     def _ficha(self, res):
         tema, pds, p = res.get('tema', {}), res.get('plan_datos', {}), res.get('puntuacion', {})
