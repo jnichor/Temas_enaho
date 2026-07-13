@@ -20,12 +20,18 @@ Un ítem del plan:
   "brecha": "Brecha de ingreso laboral por sexo",
   "outcome": {"archivo": "0005_enaho01a-2023-500.csv", "variable": "P524A1"},
   "grupo":   {"archivo": "0002_enaho01-2023-200.csv", "variable": "P207",
-              "etiquetas": {"1": "Hombre", "2": "Mujer"}},
+              "etiquetas": {"1": "Hombre", "2": "Mujer"},
+              "restriccion": {"variable": "P203", "condicion": "== 1"}},  # opcional
   "ponderador": {"archivo": "0005_enaho01a-2023-500.csv", "variable": "FAC500A"},
   "estadistico": "media"   # media | mediana
 }
+
+Si 'grupo' viene de un archivo de nivel MÁS FINO que 'outcome' (ej. grupo a nivel
+persona, outcome a nivel hogar), la variable de grupo sola tiene varias filas por
+hogar. 'restriccion' (opcional, propuesta por el razonador) aísla UNA fila por
+llave de outcome (ej. el jefe/jefa de hogar) ANTES del chequeo de niveles.
 """
-import os, glob, copy
+import os, re, glob, copy
 import numpy as np
 import polars as pl
 
@@ -75,6 +81,19 @@ def _dup_en_llaves(lf, keys):
     d = (lf.select(keys).group_by(keys).len()
            .filter(pl.col('len') > 1).limit(1).collect(engine='streaming'))
     return d.height > 0
+
+
+def _cond_mask(col, condicion):
+    """Convierte una condición numérica simple ('== 1', '!= 1', '>= 65', ...) en una
+    máscara polars. Sin eval(): solo reconoce el patrón operador+número; si la condición
+    no matchea ese patrón devuelve None (el llamador decide qué hacer)."""
+    m = re.match(r'^\s*(==|!=|>=|<=|>|<|=)?\s*(-?\d+(?:[.,]\d+)?)\s*$', condicion or '')
+    if not m:
+        return None
+    op, val = m.group(1) or '==', float(m.group(2).replace(',', '.'))
+    c = col.cast(pl.Float64, strict=False)
+    return {'==': c == val, '=': c == val, '!=': c != val,
+            '>=': c >= val, '<=': c <= val, '>': c > val, '<': c < val}[op]
 
 
 def _weighted_median(x, w):
@@ -130,6 +149,7 @@ def _una_brecha(item, year, carpeta=None):
     lf = lo.select(sel)
 
     # --- grupo desde OTRO archivo: validar NIVELES (m:1) antes de unir ---
+    nota_restr = None
     if arch_g != arch_o:
         lg = _scan(arch_g, year, carpeta)
         cg = _cols(lg)
@@ -138,13 +158,27 @@ def _una_brecha(item, year, carpeta=None):
         keys = [k for k in KEYS4 if k in co and k in cg]
         if not keys:
             raise ValueError("sin llaves comunes para merge")
+        # restricción propuesta por el razonador (ej. "jefe de hogar"): reduce el archivo de
+        # grupo a 1 fila por llave ANTES del chequeo m:1, cuando grupo es de nivel más fino que outcome.
+        restr = item['grupo'].get('restriccion') or {}
+        rvar = (restr.get('variable') or '').upper() or None
+        if rvar and rvar in cg and restr.get('condicion'):
+            mask = _cond_mask(pl.col(rvar), restr['condicion'])
+            if mask is not None:
+                lg = lg.filter(mask)
+            else:
+                nota_restr = ('la restricción de grupo "%s %s" no se pudo interpretar; se ignoró'
+                              % (rvar, restr['condicion']))
+        elif rvar:
+            nota_restr = 'la restricción de grupo "%s" no existe en %s; se ignoró' % (rvar, arch_g)
         lg = lg.select(keys + [gv]).unique()
         if _dup_en_llaves(lg, keys):
             raise ValueError(
-                "niveles incompatibles: '%s' tiene varias filas por %s; unirlo "
-                "multiplicaría filas e inflaría la estadística. Usa una variable de "
-                "grupo del mismo archivo del outcome o de un módulo con 1 fila por esa llave."
-                % (arch_g, '+'.join(keys)))
+                ("niveles incompatibles: '%s' tiene varias filas por %s; unirlo "
+                 "multiplicaría filas e inflaría la estadística. Usa una variable de "
+                 "grupo del mismo archivo del outcome o de un módulo con 1 fila por esa llave."
+                 % (arch_g, '+'.join(keys)))
+                + ((' (%s; tampoco alcanzó para reducirlo a 1 fila por llave)' % nota_restr) if nota_restr else ''))
         lf = lf.join(lg, on=keys, how='inner')
 
     # --- peso desde OTRO archivo ---
@@ -196,7 +230,7 @@ def _una_brecha(item, year, carpeta=None):
     out = {'brecha': item.get('brecha'), 'outcome': ov, 'grupo': gv,
            'estadistico': estad, 'ponderador': wname or 'sin ponderar',
            'anio': str(year), 'n_total': int(df.height), 'grupos': grupos}
-    notas = [nota_pond] if nota_pond else []
+    notas = [n for n in (nota_pond, nota_restr) if n]
     n9999 = int((df['_y'] == 9999.0).sum())     # posible código de missing de 4 dígitos
     if n9999 >= 5:
         notas.append('%d valores exactamente 9999 en %s: podría ser código de no respuesta '
