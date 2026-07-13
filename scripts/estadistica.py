@@ -620,7 +620,10 @@ def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, year, out_
         reporte['filtros_aplicados'].append({'variable': var, 'condicion': cond})
 
     # --- limpieza: variables numéricas del manifiesto que NO salieron ya limpias de una agregación ---
-    roles_numericos = {'dependiente', 'independiente', 'control'}
+    # 'ponderador' (factor de expansión) es SIEMPRE numérico y hace falta limpio para poder
+    # usarlo en cualquier análisis ponderado fuera del sistema; sin él en la lista, el CSV final
+    # exportaba el ponderador con coma decimal sin convertir (ej. "656,63" en vez de "656.63").
+    roles_numericos = {'dependiente', 'independiente', 'control', 'ponderador'}
     a_limpiar = {v['variable'].upper() for v in manifiesto
                 if isinstance(v, dict) and (v.get('rol') or '').lower() in roles_numericos and v.get('variable')}
     cols_final = _cols(lf)
