@@ -488,6 +488,14 @@ class ENAHOApp(App):
                           f"al elegir las variables concretas, la estrategia se sostiene menos de lo previsto.[/]")
             await self._guardar(res)
             res['filtros'] = await self._paso(log, "Plan de datos · filtros", RZ.sugerir_filtros, cat, tema, res['manifiesto'])
+            res['filtros_contradictorios'] = await self._paso(
+                log, "Plan de datos · verificando que los filtros no se contradigan",
+                EST.verificar_filtros, res['filtros'], rep, carp)
+            for fc in res['filtros_contradictorios']:
+                if fc.get('error'):
+                    continue
+                combo = ' + '.join(f"{f['variable']} {f['condicion']}" for f in fc['filtros'])
+                log.write(f"[red]⚠ Filtros contradictorios en {fc['archivo']}:[/] {combo} — {fc['alerta']}")
             res['plan_datos'] = RZ.plan_de_datos(cat, tema, res['manifiesto'], res['filtros'])
             log.write(self._panel_plan(res['plan_datos']))
             res['verificacion_merge'] = await self._paso(log, "Plan de datos · verificar merge", EST.verificar_merge, res['plan_datos'], rep, carp)
@@ -618,6 +626,13 @@ class ENAHOApp(App):
             b.append("[yellow]Filtros NO aplicados (requieren verificación manual):[/]")
             for f in rep['filtros_omitidos']:
                 b.append(f"  • {f['variable']}: {f['motivo']}")
+        if rep.get('filtros_contradictorios'):
+            b.append("[red]⚠ Filtros contradictorios (patrón de salto del cuestionario, no aplicados juntos):[/]")
+            for fc in rep['filtros_contradictorios']:
+                if fc.get('error'):
+                    continue
+                combo = ' + '.join(f"{f['variable']} {f['condicion']}" for f in fc['filtros'])
+                b.append(f"  • {fc['archivo']}: {combo}")
         if rep.get('nulos_por_columna'):
             b.append("Nulos: " + ', '.join(f"{c}={n}" for c, n in rep['nulos_por_columna'].items()))
         return Panel("\n".join(b), title="Paso 11 · Dataset final mergeado y limpio",

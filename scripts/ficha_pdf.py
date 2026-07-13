@@ -132,6 +132,12 @@ def generar_ficha_pdf(res, cat, out_path):
         for f in de.get('filtros_omitidos', []):
             el.append(Paragraph('<font color="#c62828">⚠ Filtro NO aplicado (%s):</font> %s'
                                 % (f['variable'], f['motivo']), small))
+        for fc in de.get('filtros_contradictorios', []):
+            if fc.get('error'):
+                continue
+            combo = ' + '.join('%s %s' % (f['variable'], f['condicion']) for f in fc['filtros'])
+            el.append(Paragraph('<font color="#c62828">⚠ Filtros contradictorios en %s (%s):</font> %s'
+                                % (fc['archivo'], combo, fc['alerta']), small))
 
     # Brechas medidas
     br = [b for b in (res.get('brechas') or []) if not b.get('error')]

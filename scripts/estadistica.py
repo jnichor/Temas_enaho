@@ -398,6 +398,55 @@ def verificar_merge(plan, year, carpeta=None):
     return rep
 
 
+def verificar_filtros(filtros, year, carpeta=None):
+    """Verifica, ARCHIVO por archivo, que los filtros con condición numérica no se
+    contradigan entre sí. El caso típico en la ENAHO: dos preguntas son mutuamente
+    excluyentes por el patrón de SALTO del cuestionario (una solo se pregunta si la
+    otra no aplica, ej. P204 y P206) — sugerir_filtros() no conoce ese patrón de
+    salto, solo el significado y los códigos de cada variable por separado. Firma de
+    esta contradicción: cada filtro por sí solo SÍ tiene datos, pero TODOS juntos dan
+    0 filas — eso no es un resultado real de la población, es una combinación
+    imposible de responder."""
+    por_archivo = {}
+    for f in (filtros or []):
+        var = (f.get('variable') or '').upper()
+        cond = f.get('condicion')
+        arch = f.get('archivo')
+        if arch and var and cond:
+            por_archivo.setdefault(arch, []).append((var, cond))
+    rep = []
+    for arch, pares in por_archivo.items():
+        if len(pares) < 2:
+            continue
+        try:
+            lf = _scan(arch, year, carpeta)
+            cols = _cols(lf)
+            individuales, mask_total = {}, None
+            for var, cond in pares:
+                if var not in cols:
+                    continue
+                m = _cond_mask(pl.col(var), cond)
+                if m is None:
+                    continue
+                individuales[var] = int(lf.filter(m).select(pl.len()).collect(engine='streaming').item())
+                mask_total = m if mask_total is None else (mask_total & m)
+            if mask_total is None or len(individuales) < 2:
+                continue
+            combinado = int(lf.filter(mask_total).select(pl.len()).collect(engine='streaming').item())
+            if combinado == 0 and all(n > 0 for n in individuales.values()):
+                rep.append({
+                    'archivo': arch, 'filtros': [{'variable': v, 'condicion': c} for v, c in pares],
+                    'filas_individuales': individuales, 'filas_combinadas': 0,
+                    'alerta': ('estos filtros por separado SÍ tienen datos, pero JUNTOS no dejan ninguna '
+                              'fila; probablemente son mutuamente excluyentes por el patrón de salto del '
+                              'cuestionario (una pregunta que solo se hace si la otra no aplica), no un '
+                              'resultado real de la población — verifica el diccionario antes de '
+                              'combinarlos, o aplícalos por separado')})
+        except Exception as e:
+            rep.append({'archivo': arch, 'error': str(e)})
+    return rep
+
+
 # ----------------------------- exportar dataset final -----------------------------
 def _limpia_numerica(col):
     """comas decimales -> punto, centinelas de no-respuesta -> null, cast Float64.
@@ -440,7 +489,8 @@ def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, year, out_
     # a todos los hogares NO tratados (null), perdiendo el grupo de comparación sin que nadie lo pida.
 
     reporte = {'variables_excluidas': [], 'agregaciones': [], 'restricciones': [],
-              'filtros_aplicados': [], 'filtros_omitidos': [], 'columnas_limpiadas': []}
+              'filtros_aplicados': [], 'filtros_omitidos': [], 'columnas_limpiadas': [],
+              'filtros_contradictorios': verificar_filtros(filtros, year, carpeta)}
     ya_limpias = set()   # columnas que ya salen numéricas y limpias de una agregación
 
     def _prep_archivo(archivo, cols_deseadas, join_keys):
