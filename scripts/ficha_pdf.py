@@ -115,29 +115,33 @@ def generar_ficha_pdf(res, cat, out_path):
     # Dataset final: el merge ejecutado de verdad (no solo el plan), con su QC
     de = res.get('dataset_export') or {}
     if de:
+        _anio = lambda d: ' [%s]' % d['anio'] if d.get('anio') else ''
         el += [Paragraph('Dataset final (mergeado y limpio)', h2)]
         el.append(Paragraph('<b>%s</b> filas &times; <b>%s</b> columnas &nbsp;·&nbsp; duplicadas por llave: %s '
-                            '&nbsp;·&nbsp; archivo: %s' %
+                            '&nbsp;·&nbsp; años: %s &nbsp;·&nbsp; archivo: %s' %
                             (de.get('filas'), len(de.get('columnas', [])), de.get('filas_duplicadas_por_llave'),
-                             de.get('ruta')), small))
+                             ', '.join(de.get('anios', [])), de.get('ruta')), small))
+        for a_err in de.get('anios_con_error', []):
+            el.append(Paragraph('<font color="#c62828">⚠ El año %s no se pudo materializar:</font> %s'
+                                % (a_err['anio'], a_err['error']), small))
         for a in de.get('agregaciones', []):
-            el.append(Paragraph('• %s.%s se agregó (%s) — el archivo original tenía varias filas por llave'
-                                % (a['archivo'], a['variable'], a['funcion']), small))
+            el.append(Paragraph('• %s.%s se agregó (%s) — el archivo original tenía varias filas por llave%s'
+                                % (a['archivo'], a['variable'], a['funcion'], _anio(a)), small))
         for r in de.get('restricciones', []):
-            el.append(Paragraph('• %s.%s se restringió a %s %s para aislar 1 fila por llave'
-                                % (r['archivo'], r['variable'], r['restriccion']['variable'], r['restriccion']['condicion']), small))
+            el.append(Paragraph('• %s.%s se restringió a %s %s para aislar 1 fila por llave%s'
+                                % (r['archivo'], r['variable'], r['restriccion']['variable'], r['restriccion']['condicion'], _anio(r)), small))
         for e in de.get('variables_excluidas', []):
-            el.append(Paragraph('<font color="#c62828">⚠ %s.%s excluida del dataset:</font> %s'
-                                % (e['archivo'], e['variable'], e['motivo']), small))
+            el.append(Paragraph('<font color="#c62828">⚠ %s.%s excluida del dataset:</font> %s%s'
+                                % (e['archivo'], e['variable'], e['motivo'], _anio(e)), small))
         for f in de.get('filtros_omitidos', []):
-            el.append(Paragraph('<font color="#c62828">⚠ Filtro NO aplicado (%s):</font> %s'
-                                % (f['variable'], f['motivo']), small))
+            el.append(Paragraph('<font color="#c62828">⚠ Filtro NO aplicado (%s):</font> %s%s'
+                                % (f['variable'], f['motivo'], _anio(f)), small))
         for fc in de.get('filtros_contradictorios', []):
             if fc.get('error'):
                 continue
             combo = ' + '.join('%s %s' % (f['variable'], f['condicion']) for f in fc['filtros'])
-            el.append(Paragraph('<font color="#c62828">⚠ Filtros contradictorios en %s (%s):</font> %s'
-                                % (fc['archivo'], combo, fc['alerta']), small))
+            el.append(Paragraph('<font color="#c62828">⚠ Filtros contradictorios en %s (%s):</font> %s%s'
+                                % (fc['archivo'], combo, fc['alerta'], _anio(fc)), small))
 
     # Brechas medidas
     br = [b for b in (res.get('brechas') or []) if not b.get('error')]

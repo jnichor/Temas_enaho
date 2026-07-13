@@ -517,9 +517,9 @@ class ENAHOApp(App):
                 res['resolucion_niveles'] = []
             out_csv = os.path.join('salidas', 'fichas', slug(tema.get('tema', 'tema')) + '_dataset.csv')
             res['dataset_export'] = await self._paso(
-                log, "Paso 11 · Exportando dataset final mergeado y limpio",
+                log, "Paso 11 · Exportando dataset final mergeado y limpio (%s)" % ', '.join(cob),
                 EST.materializar_dataset, res['plan_datos'], res['manifiesto'], res['filtros'],
-                res['resolucion_niveles'], rep, out_csv, carp)
+                res['resolucion_niveles'], cob, rep, out_csv, carp)
             log.write(self._panel_dataset(res['dataset_export']))
             await self._guardar(res)
 
@@ -605,34 +605,39 @@ class ENAHOApp(App):
         return Panel("\n".join(b), title="Plan de datos · merge y filtro", border_style="magenta", box=box.ROUNDED)
 
     def _panel_dataset(self, rep):
+        _anio = lambda d: f" [{d['anio']}]" if d.get('anio') else ""
         b = [f"[b]{rep['filas']}[/] filas × [b]{len(rep['columnas'])}[/] columnas  ·  "
-             f"duplicadas por llave: {rep['filas_duplicadas_por_llave']}",
+             f"duplicadas por llave: {rep['filas_duplicadas_por_llave']}  ·  años: {', '.join(rep.get('anios', []))}",
              f"Archivo: {rep['ruta']}"]
+        if rep.get('anios_con_error'):
+            b.append("[red]⚠ Años que NO se pudieron materializar:[/]")
+            for a in rep['anios_con_error']:
+                b.append(f"  • {a['anio']}: {a['error']}")
         if rep.get('agregaciones'):
             b.append("Agregadas (archivo a nivel ítem → 1 fila por llave):")
             for a in rep['agregaciones']:
-                b.append(f"  • {a['archivo']}.{a['variable']} ({a['funcion']})")
+                b.append(f"  • {a['archivo']}.{a['variable']} ({a['funcion']}){_anio(a)}")
         if rep.get('restricciones'):
             b.append("Restringidas (1 fila por llave vía condición):")
             for r in rep['restricciones']:
-                b.append(f"  • {r['archivo']}.{r['variable']} ({r['restriccion']['variable']} {r['restriccion']['condicion']})")
+                b.append(f"  • {r['archivo']}.{r['variable']} ({r['restriccion']['variable']} {r['restriccion']['condicion']}){_anio(r)}")
         if rep.get('variables_excluidas'):
             b.append("[red]Excluidas del dataset (no se pudieron reducir con seguridad):[/]")
             for e in rep['variables_excluidas']:
-                b.append(f"  • {e['archivo']}.{e['variable']}: {e['motivo']}")
+                b.append(f"  • {e['archivo']}.{e['variable']}: {e['motivo']}{_anio(e)}")
         if rep.get('filtros_aplicados'):
-            b.append("Filtros aplicados: " + ', '.join(f"{f['variable']} {f['condicion']}" for f in rep['filtros_aplicados']))
+            b.append("Filtros aplicados: " + ', '.join(f"{f['variable']} {f['condicion']}{_anio(f)}" for f in rep['filtros_aplicados']))
         if rep.get('filtros_omitidos'):
             b.append("[yellow]Filtros NO aplicados (requieren verificación manual):[/]")
             for f in rep['filtros_omitidos']:
-                b.append(f"  • {f['variable']}: {f['motivo']}")
+                b.append(f"  • {f['variable']}: {f['motivo']}{_anio(f)}")
         if rep.get('filtros_contradictorios'):
             b.append("[red]⚠ Filtros contradictorios (patrón de salto del cuestionario, no aplicados juntos):[/]")
             for fc in rep['filtros_contradictorios']:
                 if fc.get('error'):
                     continue
                 combo = ' + '.join(f"{f['variable']} {f['condicion']}" for f in fc['filtros'])
-                b.append(f"  • {fc['archivo']}: {combo}")
+                b.append(f"  • {fc['archivo']}: {combo}{_anio(fc)}")
         if rep.get('nulos_por_columna'):
             b.append("Nulos: " + ', '.join(f"{c}={n}" for c, n in rep['nulos_por_columna'].items()))
         return Panel("\n".join(b), title="Paso 11 · Dataset final mergeado y limpio",

@@ -457,7 +457,38 @@ def _limpia_numerica(col):
     return c.cast(pl.Float64, strict=False)
 
 
-def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, year, out_path, carpeta=None):
+def _archivo_para_anio(archivo, rep, year):
+    """Traduce el nombre de archivo (que embebe el año, ej. '...-2025-700b.csv') de
+    `rep` a `year`. Misma convención que _plan_para_anio (brechas multi-año)."""
+    if not archivo or str(rep) == str(year):
+        return archivo
+    return archivo.replace(str(rep), str(year))
+
+
+def _plan_datos_para_anio(plan_datos, rep, year):
+    if str(rep) == str(year):
+        return plan_datos
+    p2 = copy.deepcopy(plan_datos)
+    if p2.get('archivo_base'):
+        p2['archivo_base'] = _archivo_para_anio(p2['archivo_base'], rep, year)
+    for p in p2.get('secuencia_merge', []):
+        if p.get('archivo'):
+            p['archivo'] = _archivo_para_anio(p['archivo'], rep, year)
+    return p2
+
+
+def _lista_para_anio(items, rep, year):
+    """Traduce el 'archivo' de cada elemento de filtros/resolución a otro año."""
+    if str(rep) == str(year):
+        return items
+    out = copy.deepcopy(items or [])
+    for it in out:
+        if it.get('archivo'):
+            it['archivo'] = _archivo_para_anio(it['archivo'], rep, year)
+    return out
+
+
+def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, anios, rep, out_path, carpeta=None):
     """Ejecuta DE VERDAD el plan de datos (a diferencia de calcular()/verificar_merge(),
     que solo validan o computan agregados por brecha): arma el dataset final con TODAS
     las variables del manifiesto mergeadas, resolviendo con `resolucion` (ver
@@ -465,7 +496,57 @@ def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, year, out_
     aplica los filtros de población que tengan condición verificada, limpia cada
     columna numérica del manifiesto y lo escribe en `out_path`. Devuelve un reporte
     (nunca falla en silencio: todo lo que no se pudo resolver queda listado, no se
-    adivina)."""
+    adivina).
+
+    `anios` es la lista de TODOS los años de cobertura del tema (no solo `rep`, el año
+    representativo con el que se construyeron plan_datos/filtros/resolucion): si el tema
+    cubre varios años, se materializa CADA UNO (traduciendo los nombres de archivo de
+    `rep` a ese año) y se apilan con una columna 'ANIO' — antes solo se exportaba el año
+    representativo, perdiendo silenciosamente el resto de la cobertura."""
+    anios = [str(a) for a in (anios if isinstance(anios, (list, tuple, set)) else [anios])]
+    rep = str(rep)
+    reporte = {'variables_excluidas': [], 'agregaciones': [], 'restricciones': [],
+              'filtros_aplicados': [], 'filtros_omitidos': [], 'columnas_limpiadas': set(),
+              'filtros_contradictorios': [], 'anios': anios, 'anios_con_error': []}
+    dfs = []
+    for year in anios:
+        try:
+            pd_y = _plan_datos_para_anio(plan_datos, rep, year)
+            manifiesto_y = _lista_para_anio(manifiesto, rep, year)
+            filtros_y = _lista_para_anio(filtros, rep, year)
+            resolucion_y = _lista_para_anio(resolucion, rep, year)
+            df_y, rep_y = _materializar_un_anio(pd_y, manifiesto_y, filtros_y, resolucion_y, year, carpeta)
+        except Exception as e:
+            reporte['anios_con_error'].append({'anio': year, 'error': str(e)})
+            continue
+        dfs.append(df_y.with_columns(pl.lit(year).alias('ANIO')))
+        for k in ('variables_excluidas', 'agregaciones', 'restricciones',
+                 'filtros_aplicados', 'filtros_omitidos', 'filtros_contradictorios'):
+            for item in rep_y.get(k, []):
+                reporte[k].append(dict(item, anio=year))
+        reporte['columnas_limpiadas'] |= set(rep_y.get('columnas_limpiadas', []))
+
+    if not dfs:
+        raise ValueError("ningún año de cobertura (%s) pudo materializarse: %s"
+                         % (', '.join(anios), reporte['anios_con_error']))
+    df = pl.concat(dfs, how='diagonal_relaxed')
+    reporte['columnas_limpiadas'] = sorted(reporte['columnas_limpiadas'])
+
+    llaves_con_anio = ['ANIO'] + plan_datos['llaves_merge']
+    dup_final = df.group_by(llaves_con_anio).len().filter(pl.col('len') > 1).height
+    nulos = {c: int(df[c].null_count()) for c in df.columns if df[c].null_count() > 0}
+    reporte.update({'filas': df.height, 'columnas': df.columns,
+                    'filas_duplicadas_por_llave': dup_final, 'nulos_por_columna': nulos})
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    df.write_csv(out_path)
+    reporte['ruta'] = out_path
+    return reporte
+
+
+def _materializar_un_anio(plan_datos, manifiesto, filtros, resolucion, year, carpeta=None):
+    """El motor real para UN año (lo que antes era materializar_dataset completo).
+    Devuelve (DataFrame, reporte_parcial) SIN escribir a disco — eso lo hace el wrapper
+    multi-año de arriba, que apila los años y agrega la columna 'ANIO'."""
     llaves_merge = plan_datos['llaves_merge']
     base = plan_datos['archivo_base']
     res_de = {}
@@ -634,15 +715,8 @@ def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, year, out_
 
     df = lf.collect(engine='streaming')
 
-    # --- QC final: nunca afirmar "limpio" sin volver a comprobarlo sobre el resultado ---
-    dup_final = df.group_by(llaves_merge).len().filter(pl.col('len') > 1).height
-    nulos = {c: int(df[c].null_count()) for c in df.columns if df[c].null_count() > 0}
-    reporte.update({
-        'filas': df.height, 'columnas': df.columns,
-        'filas_duplicadas_por_llave': dup_final,
-        'nulos_por_columna': nulos,
-    })
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    df.write_csv(out_path)
-    reporte['ruta'] = out_path
-    return reporte
+    # --- QC de ESTE año: nunca afirmar "limpio" sin volver a comprobarlo sobre el resultado ---
+    # (el chequeo combinado con 'ANIO' lo hace el wrapper multi-año, después de apilar)
+    reporte['filas'] = df.height
+    reporte['filas_duplicadas_por_llave'] = df.group_by(llaves_merge).len().filter(pl.col('len') > 1).height
+    return df, reporte
