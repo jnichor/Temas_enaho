@@ -23,6 +23,8 @@ El sistema descarga y organiza la data, la documenta, y luego usa razonamiento (
 
 El entregable final es una **ficha** (en pantalla y en PDF, `salidas/fichas/`) con: tema, cobertura de años, diseño causal, variables (código + significado del diccionario), **plan de merge y filtros verificados**, brechas medidas —con su evolución si hay varios años— y puntuación (impacto / relevancia / factibilidad). El progreso se guarda en cada paso (`temas/<tema>/propuesta.json`), así una interrupción a mitad de camino no pierde el trabajo ni la cuota gastada.
 
+Un paso adicional (**11 · Exportar dataset final**) ejecuta de verdad el plan de merge y filtros —no solo lo describe— y entrega un CSV mergeado y limpio junto a su control de calidad (duplicados por llave, nulos, qué se agregó/restringió/excluyó). El detalle completo de esa metodología (selección de variables, filtros, limpieza, resolución de niveles) está en [docs/metodologia_datos.md](docs/metodologia_datos.md).
+
 ---
 
 ## Requisitos
