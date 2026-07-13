@@ -27,6 +27,7 @@ MODELOS = {
     'analizar_tema': 'sonnet', 'diseno_causal': 'sonnet', 'interpretar_brechas': 'sonnet',
     'contraste_literatura': 'sonnet', 'puntuar': 'sonnet',
     'seleccionar_variables': 'haiku', 'sugerir_filtros': 'haiku', 'plan_brechas': 'haiku',
+    'plan_resolucion_niveles': 'haiku',
 }
 
 
@@ -386,7 +387,15 @@ def sugerir_filtros(cat, tema, manifiesto):
         "variables que existan en los módulos.\nTema: %s\nVariables disponibles:\n%s\n\n"
         "Ej: ocupados, PEA, edad>=14, residentes habituales. Expresa cada filtro como condición sobre "
         "una variable concreta. Si no hace falta filtrar, devuelve lista vacía.\n"
-        "Devuelve JSON: [{\"archivo\": str, \"variable\": str, \"condicion\": str, \"motivo\": str}]"
+        "REGLA ESTRICTA sobre 'condicion': el detalle de módulos solo trae el SIGNIFICADO de cada "
+        "variable, NO el código numérico de sus valores (ej. sabes que P206 pregunta algo, pero NO sabes "
+        "con certeza si 'Sí' es el código 1 o 2 sin el diccionario de códigos). Por eso:\n"
+        "  - Si la condición es sobre una variable NUMÉRICA continua (edad, ingreso, etc.), usa un número "
+        "real: \"condicion\": \">= 65\".\n"
+        "  - Si la condición depende del CÓDIGO de una variable categórica (sí/no, categorías) y NO estás "
+        "100%% seguro del código exacto, NO LO INVENTES: pon \"condicion\": null y explica en 'motivo' qué "
+        "condición hace falta y que su código debe verificarse en el diccionario oficial antes de aplicarla.\n"
+        "Devuelve JSON: [{\"archivo\": str, \"variable\": str, \"condicion\": str|null, \"motivo\": str}]"
         % (tema.get('tema'), json.dumps(det, ensure_ascii=False)))
     return ask_json(prompt, model=MODELOS['sugerir_filtros'])
 
@@ -432,11 +441,64 @@ def plan_de_datos(cat, tema, manifiesto, filtros):
             explicacion.append("'%s' está a nivel %s: merge directo por %s (misma unidad, sin replicar)."
                                % (p['archivo'], p['nivel'], '+'.join(p['llaves_join'])))
     if filtros:
-        explicacion.append("Luego se filtra la población: %s." %
-                           '; '.join('%s %s' % (f.get('variable'), f.get('condicion')) for f in filtros))
+        aplicables = [f for f in filtros if f.get('condicion')]
+        pendientes = [f for f in filtros if not f.get('condicion')]
+        if aplicables:
+            explicacion.append("Luego se filtra la población: %s." %
+                               '; '.join('%s %s' % (f.get('variable'), f['condicion']) for f in aplicables))
+        if pendientes:
+            explicacion.append("Filtros PENDIENTES de verificar código (no se aplican solos): %s." %
+                               '; '.join('%s (%s)' % (f.get('variable'), f.get('motivo', '')) for f in pendientes))
     return {'nivel_de_analisis': nivel_analisis,
             'llaves_merge': llaves_merge, 'archivo_base': base,
             'secuencia_merge': pasos, 'filtros': filtros, 'explicacion': explicacion}
+
+
+# ---------- RESOLUCIÓN DE NIVELES: exportar el dataset final requiere que cada ----------
+# archivo del merge tenga EXACTAMENTE 1 fila por llave; verificar_merge() detecta cuáles
+# NO la tienen (broadcast con llave no única = archivo a nivel ítem/detalle). Para esos,
+# decide cómo reducirlos: agregar (suma/promedio/...), restringir a 1 fila (ej. jefe de
+# hogar), o excluir si ninguna opción es segura.
+def plan_resolucion_niveles(cat, manifiesto, plan_datos, verificacion_merge):
+    problematicos = {vm['archivo'] for vm in (verificacion_merge or [])
+                     if vm.get('broadcast') and not vm.get('ok')}
+    if not problematicos:
+        return []
+    by_file = {}
+    for v in manifiesto:
+        if isinstance(v, dict) and v.get('archivo') in problematicos and v.get('variable'):
+            by_file.setdefault(v['archivo'], []).append(v)
+    if not by_file:
+        return []
+    mods = {m['archivo']: m for m in cat['modulos']}
+    detalle = []
+    for arch, vars_ in by_file.items():
+        m = mods.get(arch, {})
+        detalle.append({'archivo': arch, 'titulo': m.get('titulo'), 'llave': m.get('llave_identificacion'),
+                        'variables_a_resolver': [{'variable': v['variable'], 'rol': v.get('rol'),
+                                                  'significado': (m.get('variables') or {}).get(v['variable'].upper())}
+                                                 for v in vars_],
+                        'todas_las_variables_del_archivo': m.get('variables', {})})
+    llaves_merge = plan_datos['llaves_merge']
+    prompt = (
+        "Estos archivos tienen MÁS DE UNA FILA por %s (son registros a nivel ítem/detalle — ej. uno por "
+        "rubro de gasto o por evento — no 1 fila por llave), pero el plan de datos necesita usarlos a ese "
+        "nivel para el dataset final. Para CADA variable en 'variables_a_resolver', decide EXACTAMENTE una "
+        "estrategia:\n"
+        "- \"agregar\": la variable es NUMÉRICA y tiene sentido sumarla/promediarla entre los ítems del "
+        "mismo hogar/persona (ej. sumar montos de gasto por rubro → gasto total). Indica \"funcion\": "
+        "\"suma\"|\"promedio\"|\"conteo\"|\"maximo\".\n"
+        "- \"restringir\": existe OTRA variable REAL en 'todas_las_variables_del_archivo' que identifica un "
+        "rol/registro único por llave (ej. jefe de hogar, registro principal) y conoces con certeza el "
+        "CÓDIGO NUMÉRICO de esa condición (ej. \"== 1\"). Indica \"restriccion\": {\"variable\": str, "
+        "\"condicion\": str}.\n"
+        "- \"excluir\": ninguna de las dos es segura (NO inventes un código de rol o de agregación que no "
+        "puedas justificar); explica el motivo.\n\n"
+        "Archivos y variables a resolver:\n%s\n\n"
+        "Devuelve JSON: [{\"archivo\": str, \"variable\": str, \"estrategia\": \"agregar\"|\"restringir\"|\"excluir\", "
+        "\"funcion\": str|null, \"restriccion\": {\"variable\": str, \"condicion\": str}|null, \"motivo\": str}]"
+        % ('+'.join(llaves_merge), json.dumps(detalle, ensure_ascii=False)))
+    return ask_json(prompt, model=MODELOS['plan_resolucion_niveles'])
 
 
 # ---------- PASO 8a: PLAN de brechas (computable) ----------

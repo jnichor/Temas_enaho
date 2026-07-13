@@ -112,6 +112,27 @@ def generar_ficha_pdf(res, cat, out_path):
         mark = '<font color="#2e7d32">✓</font>' if vm.get('ok') else '<font color="#c62828">⚠</font>'
         el.append(Paragraph('%s <b>%s</b>: %s' % (mark, vm.get('archivo'), vm.get('nota', '')), small))
 
+    # Dataset final: el merge ejecutado de verdad (no solo el plan), con su QC
+    de = res.get('dataset_export') or {}
+    if de:
+        el += [Paragraph('Dataset final (mergeado y limpio)', h2)]
+        el.append(Paragraph('<b>%s</b> filas &times; <b>%s</b> columnas &nbsp;·&nbsp; duplicadas por llave: %s '
+                            '&nbsp;·&nbsp; archivo: %s' %
+                            (de.get('filas'), len(de.get('columnas', [])), de.get('filas_duplicadas_por_llave'),
+                             de.get('ruta')), small))
+        for a in de.get('agregaciones', []):
+            el.append(Paragraph('• %s.%s se agregó (%s) — el archivo original tenía varias filas por llave'
+                                % (a['archivo'], a['variable'], a['funcion']), small))
+        for r in de.get('restricciones', []):
+            el.append(Paragraph('• %s.%s se restringió a %s %s para aislar 1 fila por llave'
+                                % (r['archivo'], r['variable'], r['restriccion']['variable'], r['restriccion']['condicion']), small))
+        for e in de.get('variables_excluidas', []):
+            el.append(Paragraph('<font color="#c62828">⚠ %s.%s excluida del dataset:</font> %s'
+                                % (e['archivo'], e['variable'], e['motivo']), small))
+        for f in de.get('filtros_omitidos', []):
+            el.append(Paragraph('<font color="#c62828">⚠ Filtro NO aplicado (%s):</font> %s'
+                                % (f['variable'], f['motivo']), small))
+
     # Brechas medidas
     br = [b for b in (res.get('brechas') or []) if not b.get('error')]
     if br:

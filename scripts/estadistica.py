@@ -86,12 +86,14 @@ def _dup_en_llaves(lf, keys):
 def _cond_mask(col, condicion):
     """Convierte una condición numérica simple ('== 1', '!= 1', '>= 65', ...) en una
     máscara polars. Sin eval(): solo reconoce el patrón operador+número; si la condición
-    no matchea ese patrón devuelve None (el llamador decide qué hacer)."""
+    no matchea ese patrón devuelve None (el llamador decide qué hacer). Limpia coma
+    decimal ANTES de castear (igual que _limpia_numerica): sin esto, una columna cruda
+    como "45,0" castea a null y el filtro descarta la fila entera en silencio."""
     m = re.match(r'^\s*(==|!=|>=|<=|>|<|=)?\s*(-?\d+(?:[.,]\d+)?)\s*$', condicion or '')
     if not m:
         return None
     op, val = m.group(1) or '==', float(m.group(2).replace(',', '.'))
-    c = col.cast(pl.Float64, strict=False)
+    c = col.str.replace(',', '.', literal=True).cast(pl.Float64, strict=False)
     return {'==': c == val, '=': c == val, '!=': c != val,
             '>=': c >= val, '<=': c <= val, '>': c > val, '<': c < val}[op]
 
@@ -394,3 +396,175 @@ def verificar_merge(plan, year, carpeta=None):
             rep.append({'archivo': p['archivo'], 'broadcast': True, 'ok': False,
                         'nota': 'no verificable: %s' % e})
     return rep
+
+
+# ----------------------------- exportar dataset final -----------------------------
+def _limpia_numerica(col):
+    """comas decimales -> punto, centinelas de no-respuesta -> null, cast Float64.
+    Mismo criterio que _una_brecha, para que el dataset final quede consistente
+    con lo que ya se usa en el cálculo de brechas."""
+    c = col.str.replace(',', '.', literal=True)
+    c = pl.when(c.str.contains(SENTINELA)).then(pl.lit(None)).otherwise(c)
+    return c.cast(pl.Float64, strict=False)
+
+
+def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, year, out_path, carpeta=None):
+    """Ejecuta DE VERDAD el plan de datos (a diferencia de calcular()/verificar_merge(),
+    que solo validan o computan agregados por brecha): arma el dataset final con TODAS
+    las variables del manifiesto mergeadas, resolviendo con `resolucion` (ver
+    razonador.plan_resolucion_niveles) los archivos que no tienen 1 fila por llave,
+    aplica los filtros de población que tengan condición verificada, limpia cada
+    columna numérica del manifiesto y lo escribe en `out_path`. Devuelve un reporte
+    (nunca falla en silencio: todo lo que no se pudo resolver queda listado, no se
+    adivina)."""
+    llaves_merge = plan_datos['llaves_merge']
+    base = plan_datos['archivo_base']
+    res_de = {}
+    for r in (resolucion or []):
+        if r.get('archivo') and r.get('variable'):
+            res_de[(r['archivo'], r['variable'].upper())] = r
+
+    reporte = {'variables_excluidas': [], 'agregaciones': [], 'restricciones': [],
+              'filtros_aplicados': [], 'filtros_omitidos': [], 'columnas_limpiadas': []}
+    ya_limpias = set()   # columnas que ya salen numéricas y limpias de una agregación
+
+    def _prep_archivo(archivo, cols_deseadas, join_keys):
+        lf = _scan(archivo, year, carpeta)
+        cols = _cols(lf)
+        keys = [k for k in join_keys if k in cols]
+        vars_ok = list(dict.fromkeys(c for c in cols_deseadas if c in cols))
+        if not keys or not vars_ok:
+            return None, keys
+        if not _dup_en_llaves(lf.select(keys), keys):
+            return lf.select(list(dict.fromkeys(keys + vars_ok))), keys
+        # llave NO única en este archivo (nivel ítem/detalle): resolver CADA variable.
+        piezas = []
+        for var in vars_ok:
+            r = res_de.get((archivo, var))
+            if not r or r.get('estrategia') == 'excluir':
+                reporte['variables_excluidas'].append(
+                    {'archivo': archivo, 'variable': var, 'motivo': (r or {}).get('motivo', 'sin resolución de nivel')})
+                continue
+            if r['estrategia'] == 'restringir':
+                restr = r.get('restriccion') or {}
+                rvar = (restr.get('variable') or '').upper()
+                if not (rvar and rvar in cols and restr.get('condicion')):
+                    reporte['variables_excluidas'].append(
+                        {'archivo': archivo, 'variable': var,
+                         'motivo': 'restricción inválida o variable "%s" inexistente en %s' % (rvar, archivo)})
+                    continue
+                mask = _cond_mask(pl.col(rvar), restr['condicion'])
+                if mask is None:
+                    reporte['variables_excluidas'].append(
+                        {'archivo': archivo, 'variable': var,
+                         'motivo': 'condición de restricción "%s" no interpretable' % restr['condicion']})
+                    continue
+                sub = lf.select(list(dict.fromkeys(keys + [rvar, var]))).filter(mask).select(keys + [var])
+                if _dup_en_llaves(sub, keys):
+                    reporte['variables_excluidas'].append(
+                        {'archivo': archivo, 'variable': var,
+                         'motivo': 'la restricción "%s %s" no aisló 1 fila por llave' % (rvar, restr['condicion'])})
+                    continue
+                reporte['restricciones'].append({'archivo': archivo, 'variable': var, 'restriccion': restr})
+                piezas.append(sub)
+            elif r['estrategia'] == 'agregar':
+                func = (r.get('funcion') or 'suma').lower()
+                limpio = _limpia_numerica(pl.col(var))
+                agg = {'suma': limpio.sum(), 'promedio': limpio.mean(), 'maximo': limpio.max(),
+                      'conteo': pl.col(var).count()}.get(func)
+                if agg is None:
+                    reporte['variables_excluidas'].append(
+                        {'archivo': archivo, 'variable': var, 'motivo': 'función "%s" no reconocida' % func})
+                    continue
+                sub = lf.select(keys + [var]).group_by(keys).agg(agg.alias(var))
+                reporte['agregaciones'].append({'archivo': archivo, 'variable': var, 'funcion': func})
+                ya_limpias.add(var)
+                piezas.append(sub)
+            else:
+                reporte['variables_excluidas'].append(
+                    {'archivo': archivo, 'variable': var, 'motivo': 'estrategia desconocida: %s' % r.get('estrategia')})
+        if not piezas:
+            return None, keys
+        out = piezas[0]
+        for extra in piezas[1:]:
+            out = out.join(extra, on=keys, how='left')
+        return out, keys
+
+    # --- base: debe tener 1 fila por llave de análisis; si no, no hay dataset posible ---
+    by_file = {}
+    for v in manifiesto:
+        if isinstance(v, dict) and v.get('archivo') and v.get('variable'):
+            by_file.setdefault(v['archivo'], []).append(v['variable'].upper())
+    lf_base, keys_base = _prep_archivo(base, by_file.get(base, []), llaves_merge)
+    if lf_base is None or _dup_en_llaves(_scan(base, year, carpeta).select(keys_base), keys_base):
+        raise ValueError(
+            "el archivo base '%s' no tiene 1 fila por llave de análisis (%s); no se puede "
+            "construir el dataset final sobre una base con filas duplicadas" % (base, '+'.join(llaves_merge)))
+    lf = lf_base
+
+    for p in plan_datos['secuencia_merge']:
+        if p['tipo'] == 'base':
+            continue
+        sub, keys = _prep_archivo(p['archivo'], [v.upper() for v in p['variables']], p['llaves_join'])
+        if sub is not None and keys:
+            lf = lf.join(sub, on=keys, how='left')
+
+    # --- filtros de población (solo los que traen condición numérica verificada) ---
+    cols_actuales = set(_cols(lf))
+    for f in (filtros or []):
+        var = (f.get('variable') or '').upper()
+        cond = f.get('condicion')
+        arch_f = f.get('archivo')
+        if not var or not arch_f:
+            continue
+        if not cond:
+            reporte['filtros_omitidos'].append(
+                {'variable': var, 'motivo': f.get('motivo') or 'condición no verificada (código sin confirmar)'})
+            continue
+        if var not in cols_actuales:
+            lf_f = _scan(arch_f, year, carpeta)
+            cols_f = _cols(lf_f)
+            keys_f = [k for k in llaves_merge if k in cols_f]
+            if var not in cols_f or not keys_f:
+                reporte['filtros_omitidos'].append(
+                    {'variable': var, 'motivo': 'variable o llaves no encontradas en %s' % arch_f})
+                continue
+            sub_f = lf_f.select(list(dict.fromkeys(keys_f + [var])))
+            if _dup_en_llaves(sub_f, keys_f):
+                reporte['filtros_omitidos'].append(
+                    {'variable': var, 'motivo': '"%s" tiene varias filas por llave en %s; sin forma segura de reducirlo para este filtro' % (var, arch_f)})
+                continue
+            lf = lf.join(sub_f, on=keys_f, how='left')
+            cols_actuales.add(var)
+        mask = _cond_mask(pl.col(var), cond)
+        if mask is None:
+            reporte['filtros_omitidos'].append(
+                {'variable': var, 'motivo': 'condición "%s" no es un patrón numérico reconocible' % cond})
+            continue
+        lf = lf.filter(mask)
+        reporte['filtros_aplicados'].append({'variable': var, 'condicion': cond})
+
+    # --- limpieza: variables numéricas del manifiesto que NO salieron ya limpias de una agregación ---
+    roles_numericos = {'dependiente', 'independiente', 'control'}
+    a_limpiar = {v['variable'].upper() for v in manifiesto
+                if isinstance(v, dict) and (v.get('rol') or '').lower() in roles_numericos and v.get('variable')}
+    cols_final = _cols(lf)
+    for c in cols_final:
+        if c in a_limpiar and c not in ya_limpias:
+            lf = lf.with_columns(_limpia_numerica(pl.col(c)).alias(c))
+            reporte['columnas_limpiadas'].append(c)
+
+    df = lf.collect(engine='streaming')
+
+    # --- QC final: nunca afirmar "limpio" sin volver a comprobarlo sobre el resultado ---
+    dup_final = df.group_by(llaves_merge).len().filter(pl.col('len') > 1).height
+    nulos = {c: int(df[c].null_count()) for c in df.columns if df[c].null_count() > 0}
+    reporte.update({
+        'filas': df.height, 'columnas': df.columns,
+        'filas_duplicadas_por_llave': dup_final,
+        'nulos_por_columna': nulos,
+    })
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    df.write_csv(out_path)
+    reporte['ruta'] = out_path
+    return reporte

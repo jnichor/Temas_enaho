@@ -496,6 +496,25 @@ class ENAHOApp(App):
                 log.write(f"  {mk} {vm.get('archivo')}: {vm.get('nota')}")
             res['consolidacion'] = await self._paso(log, "Plan de datos · consolidación", EST.revisar_consolidacion, cat, res['manifiesto'], rep, carp)
             await self._guardar(res)
+
+            no_ok = [vm for vm in res['verificacion_merge'] if vm.get('broadcast') and not vm.get('ok')]
+            if no_ok:
+                res['resolucion_niveles'] = await self._paso(
+                    log, "Resolviendo archivos con nivel incompatible", RZ.plan_resolucion_niveles,
+                    cat, res['manifiesto'], res['plan_datos'], res['verificacion_merge'])
+                for r in res['resolucion_niveles']:
+                    log.write(f"  · {r.get('archivo')}.{r.get('variable')} → [b]{r.get('estrategia')}[/] "
+                              f"({r.get('funcion') or (r.get('restriccion') or {}).get('condicion') or r.get('motivo','')})")
+            else:
+                res['resolucion_niveles'] = []
+            out_csv = os.path.join('salidas', 'fichas', slug(tema.get('tema', 'tema')) + '_dataset.csv')
+            res['dataset_export'] = await self._paso(
+                log, "Paso 11 · Exportando dataset final mergeado y limpio",
+                EST.materializar_dataset, res['plan_datos'], res['manifiesto'], res['filtros'],
+                res['resolucion_niveles'], rep, out_csv, carp)
+            log.write(self._panel_dataset(res['dataset_export']))
+            await self._guardar(res)
+
             plan = await self._paso(log, "Paso 8 · Planificando brechas", RZ.plan_brechas, cat, tema, res['manifiesto'])
             res['plan_brechas'] = plan   # se guarda para poder diagnosticar sin adivinar si algo falla
             await self._guardar(res)
@@ -525,8 +544,9 @@ class ENAHOApp(App):
             self._busy = None
             self._refresh_status()   # que la barra no siga mostrando ⏳ durante el modal
             log.write(f"[green]Ficha PDF:[/] {pdf_out}")
+            log.write(f"[green]Dataset final:[/] {res['dataset_export']['ruta']}")
             log.write(f"[green]Propuesta:[/] temas/{os.path.basename(d)}/propuesta.json")
-            self.notify("Propuesta lista 🎉 — ficha PDF en salidas/fichas/", title="ENAHO", timeout=7)
+            self.notify("Propuesta lista 🎉 — ficha PDF y dataset en salidas/fichas/", title="ENAHO", timeout=7)
         except Exception as ex:
             d = await self._guardar(res, estado='incompleta', error=str(ex))
             log.write(f"[red]Falló un paso: {ex}[/]")
@@ -575,6 +595,33 @@ class ENAHOApp(App):
             for f in plan['filtros']:
                 b.append(f"  • {f.get('variable')}: {f.get('condicion')}")
         return Panel("\n".join(b), title="Plan de datos · merge y filtro", border_style="magenta", box=box.ROUNDED)
+
+    def _panel_dataset(self, rep):
+        b = [f"[b]{rep['filas']}[/] filas × [b]{len(rep['columnas'])}[/] columnas  ·  "
+             f"duplicadas por llave: {rep['filas_duplicadas_por_llave']}",
+             f"Archivo: {rep['ruta']}"]
+        if rep.get('agregaciones'):
+            b.append("Agregadas (archivo a nivel ítem → 1 fila por llave):")
+            for a in rep['agregaciones']:
+                b.append(f"  • {a['archivo']}.{a['variable']} ({a['funcion']})")
+        if rep.get('restricciones'):
+            b.append("Restringidas (1 fila por llave vía condición):")
+            for r in rep['restricciones']:
+                b.append(f"  • {r['archivo']}.{r['variable']} ({r['restriccion']['variable']} {r['restriccion']['condicion']})")
+        if rep.get('variables_excluidas'):
+            b.append("[red]Excluidas del dataset (no se pudieron reducir con seguridad):[/]")
+            for e in rep['variables_excluidas']:
+                b.append(f"  • {e['archivo']}.{e['variable']}: {e['motivo']}")
+        if rep.get('filtros_aplicados'):
+            b.append("Filtros aplicados: " + ', '.join(f"{f['variable']} {f['condicion']}" for f in rep['filtros_aplicados']))
+        if rep.get('filtros_omitidos'):
+            b.append("[yellow]Filtros NO aplicados (requieren verificación manual):[/]")
+            for f in rep['filtros_omitidos']:
+                b.append(f"  • {f['variable']}: {f['motivo']}")
+        if rep.get('nulos_por_columna'):
+            b.append("Nulos: " + ', '.join(f"{c}={n}" for c, n in rep['nulos_por_columna'].items()))
+        return Panel("\n".join(b), title="Paso 11 · Dataset final mergeado y limpio",
+                     border_style="green", box=box.ROUNDED)
 
     def _tabla_brechas(self, resultados):
         t = Table(title="Paso 8 · Brechas (datos reales)", box=box.SIMPLE, title_style="bold cyan")
@@ -636,8 +683,11 @@ class ENAHOApp(App):
                 f"[b]Módulos:[/] {', '.join(map(str, tema.get('modulos', [])))}\n"
                 f"[b]Variables:[/]\n{vs}\n\n"
                 f"[b]Merge:[/] {pds.get('nivel_de_analisis')} por {'+'.join(pds.get('llaves_merge', []))}\n"
-                f"[b]Filtros:[/] {', '.join(f.get('condicion','') for f in pds.get('filtros', [])) or 'ninguno'}\n\n"
+                f"[b]Filtros:[/] {', '.join(f.get('condicion') or '(sin verificar)' for f in pds.get('filtros', [])) or 'ninguno'}\n\n"
                 f"[b]Puntaje:[/] {p.get('puntaje_total','?')} — {p.get('veredicto','')}\n"
+                f"[b]Dataset final:[/] {(res.get('dataset_export') or {}).get('filas','?')} filas × "
+                f"{len((res.get('dataset_export') or {}).get('columnas',[]))} columnas — "
+                f"{(res.get('dataset_export') or {}).get('ruta','—')}\n"
                 f"[dim]Ficha completa en salidas/fichas/ (PDF)[/]")
         return Panel(body, title="📋 FICHA DE INVESTIGACIÓN", border_style="green", box=box.DOUBLE)
 
