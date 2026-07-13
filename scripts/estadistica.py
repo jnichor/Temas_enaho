@@ -423,6 +423,21 @@ def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, year, out_
     for r in (resolucion or []):
         if r.get('archivo') and r.get('variable'):
             res_de[(r['archivo'], r['variable'].upper())] = r
+    # si un filtro apunta a la MISMA (archivo, variable) que necesita resolución de nivel,
+    # el filtro manda: define qué código deja 1 fila por llave (ej. P712 == 5 = "Programa
+    # Pensión 65"). Sin esto, la resolución (ej. "agregar: conteo") podía transformar la
+    # columna en algo que ya NO significa lo que el filtro cree que está filtrando, y el
+    # filtro posterior sobre esa columna transformada habría dado un resultado silenciosamente
+    # distinto al pedido (ej. filtrar "conteo de programas == 5" en vez de "recibió el programa 5").
+    filtro_de = {}
+    for f in (filtros or []):
+        var = (f.get('variable') or '').upper()
+        if f.get('archivo') and var and f.get('condicion'):
+            filtro_de[(f['archivo'], var)] = f['condicion']
+    filtros_ya_aplicados_en_merge = set()   # (archivo, variable) ya resueltos como restricción arriba:
+    # NO se re-aplican en el paso de filtros post-merge, porque para entonces la columna ya solo
+    # contiene el valor filtrado o null (por el LEFT JOIN) — re-filtrar "== 5" ahí borraría también
+    # a todos los hogares NO tratados (null), perdiendo el grupo de comparación sin que nadie lo pida.
 
     reporte = {'variables_excluidas': [], 'agregaciones': [], 'restricciones': [],
               'filtros_aplicados': [], 'filtros_omitidos': [], 'columnas_limpiadas': []}
@@ -440,7 +455,10 @@ def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, year, out_
         # llave NO única en este archivo (nivel ítem/detalle): resolver CADA variable.
         piezas = []
         for var in vars_ok:
-            r = res_de.get((archivo, var))
+            cond_filtro = filtro_de.get((archivo, var))
+            r = ({'estrategia': 'restringir', 'restriccion': {'variable': var, 'condicion': cond_filtro},
+                 'motivo': 'condición tomada del filtro de población sobre esta misma variable'}
+                 if cond_filtro else res_de.get((archivo, var)))
             if not r or r.get('estrategia') == 'excluir':
                 reporte['variables_excluidas'].append(
                     {'archivo': archivo, 'variable': var, 'motivo': (r or {}).get('motivo', 'sin resolución de nivel')})
@@ -465,7 +483,12 @@ def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, year, out_
                         {'archivo': archivo, 'variable': var,
                          'motivo': 'la restricción "%s %s" no aisló 1 fila por llave' % (rvar, restr['condicion'])})
                     continue
-                reporte['restricciones'].append({'archivo': archivo, 'variable': var, 'restriccion': restr})
+                reporte['restricciones'].append({'archivo': archivo, 'variable': var, 'restriccion': restr,
+                                                 'origen': 'filtro' if cond_filtro else 'plan_resolucion_niveles'})
+                if cond_filtro:
+                    filtros_ya_aplicados_en_merge.add((archivo, var))
+                    reporte['filtros_aplicados'].append({'variable': var, 'condicion': cond_filtro,
+                                                         'nota': 'aplicado al armar el merge (resolución de nivel), no post-merge'})
                 piezas.append(sub)
             elif r['estrategia'] == 'agregar':
                 func = (r.get('funcion') or 'suma').lower()
@@ -517,6 +540,8 @@ def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, year, out_
         arch_f = f.get('archivo')
         if not var or not arch_f:
             continue
+        if (arch_f, var) in filtros_ya_aplicados_en_merge:
+            continue   # ya se aplicó como restricción de nivel al armar el merge (ver arriba)
         if not cond:
             reporte['filtros_omitidos'].append(
                 {'variable': var, 'motivo': f.get('motivo') or 'condición no verificada (código sin confirmar)'})

@@ -25,9 +25,10 @@ def columnas_limpias(path, delim):
 def construir(base, year, ydir):
     md = os.path.join(ydir, 'modulos')
     docs = os.path.join(base, 'microodatos_inei', 'enaho', '2_organized', 'documentation')
-    text, dic_name = G._dic_text(docs)
+    text, dic_name = G._dic_text(docs, year)
     titulos = G.parse_titulos(text)
     vardic = G.parse_var_dictionary(text)
+    valdic = G.parse_valores_dictionary(text)
     files = sorted(f for f in os.listdir(md) if f.lower().endswith('.csv'))
 
     archivos = []
@@ -37,8 +38,10 @@ def construir(base, year, ydir):
         raw = titulos.get(code) or titulos.get(re.sub(r'[A-Z]$', '', code))
         titulo = G.clean_title(raw) if raw else '(título no verificado)'
         vd = vardic.get(code) or vardic.get(re.sub(r'[A-Z]$', '', code)) or {}
+        vals = valdic.get(code) or valdic.get(re.sub(r'[A-Z]$', '', code)) or {}
         cols = columnas_limpias(os.path.join(md, f), m['delim']) or m['cols']
         variables = {c: (vd.get(c) or None) for c in cols}
+        valores = {c: vals[c] for c in cols if c in vals}   # solo variables con lista de códigos
         archivos.append({
             'archivo': f, 'codigo': code, 'titulo': titulo,
             'unidad_analisis': m['unidad'],
@@ -48,6 +51,7 @@ def construir(base, year, ydir):
             'completitud_pct': round(m['pct'], 1),
             'familias_variables': m['familias'],
             'variables': variables,
+            'valores': valores,
         })
 
     cat = {

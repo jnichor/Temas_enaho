@@ -45,10 +45,17 @@ def find_year_dirs():
                     yield base, y, yd
 
 
-def _dic_text(docs_dir):
+def _dic_text(docs_dir, year=None):
     dics = sorted(glob.glob(os.path.join(docs_dir, "*Diccionario*.pdf")))
     if not dics:
         return None, None
+    if year:
+        # varios años pueden compartir esta misma carpeta 'documentation'; sin filtrar por
+        # año, sorted()[0] podía elegir el diccionario de OTRO año (los códigos de valor
+        # sí cambian entre años, ej. programas sociales nuevos) en vez de fallar silencioso.
+        de_año = sorted(d for d in dics if str(year) in os.path.basename(d))
+        if de_año:
+            dics = de_año
     with pdfplumber.open(dics[0]) as pdf:
         return "\n".join((pg.extract_text() or "") for pg in pdf.pages), os.path.basename(dics[0])
 
@@ -105,6 +112,52 @@ def parse_var_dictionary(text):
         else:
             lastvar = None
     return dic
+
+
+VALDEF = re.compile(r'^(-?\d{1,3})[\.\)]\s*(.+)$')
+
+
+def parse_valores_dictionary(text):
+    """{archivo: {VARNAME: {codigo: etiqueta}}} — códigos de valor (ej. "5.Programa
+    Pensión 65") de variables CATEGÓRICAS, tal como aparecen debajo de su definición
+    en el diccionario oficial. Variables sin lista de códigos (numéricas continuas)
+    simplemente no aparecen. parse_var_dictionary() deliberadamente IGNORA estas
+    líneas (SKIPLINE las excluye de la etiqueta) para mantener el catálogo liviano;
+    esta función es la contraparte que sí las captura, para cuando el razonamiento
+    necesita saber el código EXACTO de un valor (ej. filtros, restricciones de nivel)."""
+    out = {}
+    if not text:
+        return out
+    cur, lastvar = None, None
+    for raw in text.splitlines():
+        l = raw.strip()
+        a = ARCH.search(l)
+        if a:
+            arch = a.group(1)
+            m = re.search(r'-\d{4}-(.+)$', arch)
+            cur = (m.group(1).upper() if m else ('SUMARIA' if 'SUMARIA' in arch.upper() else arch.upper()))
+            out.setdefault(cur, {})
+            lastvar = None
+            continue
+        if cur is None:
+            continue
+        m = VARDEF.match(l)
+        if m:
+            lastvar = m.group(1)
+            continue
+        if lastvar is None:
+            continue
+        if l.startswith('Rango'):
+            lastvar = None   # 'Rango : x - y' cierra la lista de códigos de esta variable
+            continue
+        vm = VALDEF.match(l)
+        if vm:
+            out[cur].setdefault(lastvar, {})[vm.group(1)] = vm.group(2).strip()
+        elif out[cur].get(lastvar) and len(l) > 2 and not SKIPLINE.match(l):
+            ultimo = max(out[cur][lastvar], key=int)   # etiqueta larga que se corta en varias líneas
+            if len(out[cur][lastvar][ultimo]) < 150:
+                out[cur][lastvar][ultimo] += ' ' + l
+    return out
 
 
 def code_from_filename(fn):
@@ -414,7 +467,7 @@ q.addEventListener('input',()=>{const v=q.value.toLowerCase();
 def build_html(base, year, ydir):
     md = os.path.join(ydir, 'modulos')
     docs = os.path.join(base, 'microodatos_inei', 'enaho', '2_organized', 'documentation')
-    text, dic_name = _dic_text(docs)
+    text, dic_name = _dic_text(docs, year)
     titles = parse_titulos(text)
     vardic = parse_var_dictionary(text)
     files = sorted(f for f in os.listdir(md) if f.lower().endswith('.csv'))

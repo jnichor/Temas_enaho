@@ -55,11 +55,17 @@ def find_year_dirs():
                     yield base, y, yd
 
 
-def parse_diccionario(docs_dir):
+def parse_diccionario(docs_dir, year=None):
     titles = {}
     dics = sorted(glob.glob(os.path.join(docs_dir, "*Diccionario*.pdf")))
     if not dics:
         return titles, None
+    if year:
+        # esta carpeta puede tener el diccionario de VARIOS años; sin filtrar, sorted()[0]
+        # podía elegir el de otro año.
+        de_año = sorted(d for d in dics if str(year) in os.path.basename(d))
+        if de_año:
+            dics = de_año
     dic = dics[0]
     with pdfplumber.open(dic) as pdf:
         text = "\n".join((p.extract_text() or "") for p in pdf.pages)
@@ -129,7 +135,7 @@ def diferencias_grupo(fs, info, max_vars=12):
 def build_pdf(base, year, ydir):
     md = os.path.join(ydir, 'modulos')
     docs = os.path.join(base, 'microodatos_inei', 'enaho', '2_organized', 'documentation')
-    titles, dic = parse_diccionario(docs)
+    titles, dic = parse_diccionario(docs, year)
     files = sorted(f for f in os.listdir(md) if f.lower().endswith('.csv'))
     groups, info = {}, {}
     for f in files:

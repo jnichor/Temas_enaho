@@ -135,7 +135,8 @@ def _modulos_detalle(cat, codigos):
                         'unidad': m['unidad_analisis'], 'llave': m['llave_identificacion'],
                         'cobertura_geografica': m['cobertura_geografica'], 'meses': m['meses'],
                         'completitud_pct': m['completitud_pct'],
-                        'variables': {k: v for k, v in m['variables'].items()}})
+                        'variables': {k: v for k, v in m['variables'].items()},
+                        'valores': m.get('valores', {})})
     return sel
 
 
@@ -387,14 +388,17 @@ def sugerir_filtros(cat, tema, manifiesto):
         "variables que existan en los módulos.\nTema: %s\nVariables disponibles:\n%s\n\n"
         "Ej: ocupados, PEA, edad>=14, residentes habituales. Expresa cada filtro como condición sobre "
         "una variable concreta. Si no hace falta filtrar, devuelve lista vacía.\n"
-        "REGLA ESTRICTA sobre 'condicion': el detalle de módulos solo trae el SIGNIFICADO de cada "
-        "variable, NO el código numérico de sus valores (ej. sabes que P206 pregunta algo, pero NO sabes "
-        "con certeza si 'Sí' es el código 1 o 2 sin el diccionario de códigos). Por eso:\n"
+        "REGLA ESTRICTA sobre 'condicion': cada módulo trae 'valores' {variable: {código: etiqueta}} SOLO "
+        "para las variables categóricas que sí tienen su lista de códigos verificada en el diccionario "
+        "oficial. Por eso:\n"
         "  - Si la condición es sobre una variable NUMÉRICA continua (edad, ingreso, etc.), usa un número "
         "real: \"condicion\": \">= 65\".\n"
-        "  - Si la condición depende del CÓDIGO de una variable categórica (sí/no, categorías) y NO estás "
-        "100%% seguro del código exacto, NO LO INVENTES: pon \"condicion\": null y explica en 'motivo' qué "
-        "condición hace falta y que su código debe verificarse en el diccionario oficial antes de aplicarla.\n"
+        "  - Si la condición depende del CÓDIGO de una variable categórica, búscalo en 'valores' de ESE "
+        "módulo y usa el código NUMÉRICO real (ej. si 'valores' dice {\"1\":\"Sí\"}, la condición es "
+        "\"== 1\", NUNCA \"= 'Sí'\").\n"
+        "  - Si la variable categórica NO aparece en 'valores' (no hay lista de códigos verificada), NO "
+        "INVENTES el código: pon \"condicion\": null y explica en 'motivo' qué condición hace falta y que "
+        "su código debe verificarse en el diccionario oficial antes de aplicarla.\n"
         "Devuelve JSON: [{\"archivo\": str, \"variable\": str, \"condicion\": str|null, \"motivo\": str}]"
         % (tema.get('tema'), json.dumps(det, ensure_ascii=False)))
     return ask_json(prompt, model=MODELOS['sugerir_filtros'])
@@ -476,9 +480,11 @@ def plan_resolucion_niveles(cat, manifiesto, plan_datos, verificacion_merge):
         m = mods.get(arch, {})
         detalle.append({'archivo': arch, 'titulo': m.get('titulo'), 'llave': m.get('llave_identificacion'),
                         'variables_a_resolver': [{'variable': v['variable'], 'rol': v.get('rol'),
-                                                  'significado': (m.get('variables') or {}).get(v['variable'].upper())}
+                                                  'significado': (m.get('variables') or {}).get(v['variable'].upper()),
+                                                  'valores_de_esta_variable': (m.get('valores') or {}).get(v['variable'].upper())}
                                                  for v in vars_],
-                        'todas_las_variables_del_archivo': m.get('variables', {})})
+                        'todas_las_variables_del_archivo': m.get('variables', {}),
+                        'valores_conocidos': m.get('valores', {})})
     llaves_merge = plan_datos['llaves_merge']
     prompt = (
         "Estos archivos tienen MÁS DE UNA FILA por %s (son registros a nivel ítem/detalle — ej. uno por "
@@ -488,12 +494,14 @@ def plan_resolucion_niveles(cat, manifiesto, plan_datos, verificacion_merge):
         "- \"agregar\": la variable es NUMÉRICA y tiene sentido sumarla/promediarla entre los ítems del "
         "mismo hogar/persona (ej. sumar montos de gasto por rubro → gasto total). Indica \"funcion\": "
         "\"suma\"|\"promedio\"|\"conteo\"|\"maximo\".\n"
-        "- \"restringir\": existe OTRA variable REAL en 'todas_las_variables_del_archivo' que identifica un "
-        "rol/registro único por llave (ej. jefe de hogar, registro principal) y conoces con certeza el "
-        "CÓDIGO NUMÉRICO de esa condición (ej. \"== 1\"). Indica \"restriccion\": {\"variable\": str, "
-        "\"condicion\": str}.\n"
-        "- \"excluir\": ninguna de las dos es segura (NO inventes un código de rol o de agregación que no "
-        "puedas justificar); explica el motivo.\n\n"
+        "- \"restringir\": aísla 1 fila por llave filtrando por un código conocido. Puede ser (a) la MISMA "
+        "variable a resolver, si 'valores_de_esta_variable' identifica un código específico que responde al "
+        "tema (ej. una variable de programa/categoría con código \"5\":\"Programa Pensión 65\" → "
+        "restriccion={\"variable\": esa misma variable, \"condicion\": \"== 5\"}), o (b) OTRA variable REAL "
+        "en 'valores_conocidos' de ese archivo que identifique un rol/registro único (ej. jefe de hogar). "
+        "El código SIEMPRE debe salir de 'valores_de_esta_variable' o 'valores_conocidos' — si el código que "
+        "necesitas no aparece ahí, NO LO INVENTES.\n"
+        "- \"excluir\": ninguna de las dos es segura con los códigos disponibles; explica el motivo.\n\n"
         "Archivos y variables a resolver:\n%s\n\n"
         "Devuelve JSON: [{\"archivo\": str, \"variable\": str, \"estrategia\": \"agregar\"|\"restringir\"|\"excluir\", "
         "\"funcion\": str|null, \"restriccion\": {\"variable\": str, \"condicion\": str}|null, \"motivo\": str}]"
