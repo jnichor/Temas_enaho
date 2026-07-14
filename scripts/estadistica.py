@@ -404,9 +404,15 @@ def verificar_filtros(filtros, year, carpeta=None):
     excluyentes por el patrón de SALTO del cuestionario (una solo se pregunta si la
     otra no aplica, ej. P204 y P206) — sugerir_filtros() no conoce ese patrón de
     salto, solo el significado y los códigos de cada variable por separado. Firma de
-    esta contradicción: cada filtro por sí solo SÍ tiene datos, pero TODOS juntos dan
+    esta contradicción: dos filtros por sí solos SÍ tienen datos, pero JUNTOS dan
     0 filas — eso no es un resultado real de la población, es una combinación
-    imposible de responder."""
+    imposible de responder.
+
+    Revisa PARES, no el combinado de TODOS los filtros de un archivo: si hubiera un
+    tercer filtro sano (ej. sexo) en el mismo archivo, combinarlo con el AND completo
+    también daría 0 (por la contradicción de los otros dos) y lo señalaría como
+    parte del problema sin tener nada que ver — el filtro sano quedaría descartado
+    sin motivo."""
     por_archivo = {}
     for f in (filtros or []):
         var = (f.get('variable') or '').upper()
@@ -421,27 +427,35 @@ def verificar_filtros(filtros, year, carpeta=None):
         try:
             lf = _scan(arch, year, carpeta)
             cols = _cols(lf)
-            individuales, mask_total = {}, None
+            info = {}
             for var, cond in pares:
-                if var not in cols:
+                if var not in cols or var in info:
                     continue
                 m = _cond_mask(pl.col(var), cond)
                 if m is None:
                     continue
-                individuales[var] = int(lf.filter(m).select(pl.len()).collect(engine='streaming').item())
-                mask_total = m if mask_total is None else (mask_total & m)
-            if mask_total is None or len(individuales) < 2:
-                continue
-            combinado = int(lf.filter(mask_total).select(pl.len()).collect(engine='streaming').item())
-            if combinado == 0 and all(n > 0 for n in individuales.values()):
-                rep.append({
-                    'archivo': arch, 'filtros': [{'variable': v, 'condicion': c} for v, c in pares],
-                    'filas_individuales': individuales, 'filas_combinadas': 0,
-                    'alerta': ('estos filtros por separado SÍ tienen datos, pero JUNTOS no dejan ninguna '
-                              'fila; probablemente son mutuamente excluyentes por el patrón de salto del '
-                              'cuestionario (una pregunta que solo se hace si la otra no aplica), no un '
-                              'resultado real de la población — verifica el diccionario antes de '
-                              'combinarlos, o aplícalos por separado')})
+                n = int(lf.filter(m).select(pl.len()).collect(engine='streaming').item())
+                info[var] = {'cond': cond, 'mask': m, 'n': n}
+            vars_ = list(info)
+            for i in range(len(vars_)):
+                for j in range(i + 1, len(vars_)):
+                    v1, v2 = vars_[i], vars_[j]
+                    if info[v1]['n'] == 0 or info[v2]['n'] == 0:
+                        continue   # ya viene vacío por si solo; no es una contradicción entre AMBOS
+                    combinado = int(lf.filter(info[v1]['mask'] & info[v2]['mask'])
+                                    .select(pl.len()).collect(engine='streaming').item())
+                    if combinado == 0:
+                        rep.append({
+                            'archivo': arch,
+                            'filtros': [{'variable': v1, 'condicion': info[v1]['cond']},
+                                       {'variable': v2, 'condicion': info[v2]['cond']}],
+                            'filas_individuales': {v1: info[v1]['n'], v2: info[v2]['n']},
+                            'filas_combinadas': 0,
+                            'alerta': ('estos filtros por separado SÍ tienen datos, pero JUNTOS no dejan '
+                                      'ninguna fila; probablemente son mutuamente excluyentes por el '
+                                      'patrón de salto del cuestionario (una pregunta que solo se hace si '
+                                      'la otra no aplica), no un resultado real de la población — verifica '
+                                      'el diccionario antes de combinarlos, o aplícalos por separado')})
         except Exception as e:
             rep.append({'archivo': arch, 'error': str(e)})
     return rep
@@ -559,10 +573,18 @@ def _materializar_un_anio(plan_datos, manifiesto, filtros, resolucion, year, car
     # columna en algo que ya NO significa lo que el filtro cree que está filtrando, y el
     # filtro posterior sobre esa columna transformada habría dado un resultado silenciosamente
     # distinto al pedido (ej. filtrar "conteo de programas == 5" en vez de "recibió el programa 5").
+    contradicciones = verificar_filtros(filtros, year, carpeta)
+    # variables involucradas en una contradicción detectada: NO se aplican solas, ni siquiera como
+    # restricción de nivel (abajo). Detectar y seguir aplicando igual (como se hacía antes) llevaba
+    # al peor resultado posible: un dataset de 0 filas, silenciándose entre el resto del reporte en
+    # vez de detener el daño.
+    vars_contradictorias = {(c['archivo'], f['variable'].upper())
+                            for c in contradicciones for f in c['filtros']}
+
     filtro_de = {}
     for f in (filtros or []):
         var = (f.get('variable') or '').upper()
-        if f.get('archivo') and var and f.get('condicion'):
+        if f.get('archivo') and var and f.get('condicion') and (f['archivo'], var) not in vars_contradictorias:
             filtro_de[(f['archivo'], var)] = f['condicion']
     filtros_ya_aplicados_en_merge = set()   # (archivo, variable) ya resueltos como restricción arriba:
     # NO se re-aplican en el paso de filtros post-merge, porque para entonces la columna ya solo
@@ -571,7 +593,7 @@ def _materializar_un_anio(plan_datos, manifiesto, filtros, resolucion, year, car
 
     reporte = {'variables_excluidas': [], 'agregaciones': [], 'restricciones': [],
               'filtros_aplicados': [], 'filtros_omitidos': [], 'columnas_limpiadas': [],
-              'filtros_contradictorios': verificar_filtros(filtros, year, carpeta)}
+              'filtros_contradictorios': contradicciones}
     ya_limpias = set()   # columnas que ya salen numéricas y limpias de una agregación
 
     def _prep_archivo(archivo, cols_deseadas, join_keys):
@@ -670,6 +692,11 @@ def _materializar_un_anio(plan_datos, manifiesto, filtros, resolucion, year, car
         cond = f.get('condicion')
         arch_f = f.get('archivo')
         if not var or not arch_f:
+            continue
+        if (arch_f, var) in vars_contradictorias:
+            reporte['filtros_omitidos'].append(
+                {'variable': var, 'motivo': 'forma parte de una combinación de filtros que se contradice '
+                 '(ver filtros_contradictorios); no se aplica solo para no vaciar el dataset a ciegas'})
             continue
         if (arch_f, var) in filtros_ya_aplicados_en_merge:
             continue   # ya se aplicó como restricción de nivel al armar el merge (ver arriba)
