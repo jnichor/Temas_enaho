@@ -525,6 +525,14 @@ class ENAHOApp(App):
                 res['resolucion_niveles'], cob, rep, out_csv, carp)
             log.write(self._panel_dataset(res['dataset_export']))
             await self._guardar(res)
+            if res['dataset_export']['filas'] == 0:
+                # un dataset final de 0 filas nunca es un resultado real de la población: es la
+                # firma de un filtro (o combinación de filtros) mal aplicado. Seguir adelante
+                # calculando brechas/interpretación/literatura sobre la nada marcaría la propuesta
+                # como "completa" cuando en realidad no sirve — se detiene acá, no en silencio.
+                raise RuntimeError(
+                    "el dataset final quedó con 0 filas; revisa 'filtros_contradictorios' y "
+                    "'filtros_omitidos' del reporte del Paso 11 antes de continuar")
 
             plan = await self._paso(log, "Paso 8 · Planificando brechas", RZ.plan_brechas, cat, tema, res['manifiesto'])
             res['plan_brechas'] = plan   # se guarda para poder diagnosticar sin adivinar si algo falla

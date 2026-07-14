@@ -93,3 +93,11 @@ Los microdatos (`enaho_*/`) y las salidas generadas (`salidas/`, `temas/`) **no 
 ## Desarrollo
 
 Un hook local (`.claude/hooks/check_py.py`, vía `.claude/settings.json`) corre tras cada edición de un `.py` del sistema: verifica sintaxis y hace un smoke test del TUI, sin usar la suscripción de Claude. Si algo se rompe, bloquea con el motivo exacto en vez de dejarlo pasar.
+
+### Tests
+
+```bash
+python tests/run_all.py
+```
+
+Corre toda la suite de regresión (`tests/verifica_*.py`, ~10 segundos). Cada test es autocontenido: arma su propia data sintética, la usa y la borra al terminar — ninguno depende de datos reales de ENAHO ni gasta cuota de Claude (las llamadas a `claude -p` se interceptan con respuestas sintéticas cuando hace falta). Corré la suite completa después de cualquier cambio en `scripts/estadistica.py`, `scripts/razonador.py` o `sistema_enaho.py`.
