@@ -335,19 +335,28 @@ def _restriccion_multianio(mcat, tema, cob):
             "en 'por_que'): %s\n" % (', '.join(cob), '; '.join(sorted(parciales)[:60])))
 
 
-def seleccionar_variables(cat, tema, mcat=None, cob=None):
+def seleccionar_variables(cat, tema, mcat=None, cob=None, contexto=None):
     det = _modulos_detalle(cat, tema.get('modulos', []))
+    extra = ("\nContexto/recomendaciones del usuario (tenlo MUY en cuenta, ej. si pide variables o "
+            "controles específicos): %s" % contexto) if contexto else ""
     prompt = (
         "PASO 7 — Selección de variables para el tema.\n"
-        "Tema: %s\nPregunta: %s\n%s\n"
+        "Tema: %s\nPregunta: %s\n%s%s\n"
         "Variables reales disponibles por módulo:\n%s\n\n"
         "Selecciona las variables necesarias. Usa SOLO nombres que existan arriba. "
         "Incluye SIEMPRE las variables de la llave de identificación (CONGLOME, VIVIENDA, HOGAR y CODPERSO "
-        "si es a nivel persona) necesarias para el MERGE entre módulos, además del factor de expansión. "
+        "si es a nivel persona) necesarias para el MERGE entre módulos, además del factor de expansión.\n"
+        "NO te limites al mínimo indispensable (tratamiento + resultado + llaves): un dataset de "
+        "investigación útil necesita CONTROLES para análisis de robustez y heterogeneidad. Si existen en "
+        "los módulos ya elegidos y tienen sentido para el tema, incluí también: características "
+        "geográficas (área urbana/rural, región/dominio), demográficas del hogar o de su jefe (sexo, edad, "
+        "nivel educativo, tamaño del hogar), u otros controles estándar en la literatura del tema. "
+        "Prioridad: tratamiento, resultado e identificación primero; después agregá controles "
+        "razonables — no una lista exhaustiva de todo el módulo, pero tampoco solo 2 o 3 variables.\n"
         "Asigna un rol a cada una (dependiente / independiente / control / identificacion / ponderador).\n"
         "Devuelve JSON: [{\"archivo\": str, \"variable\": str, \"etiqueta\": str, \"rol\": str, \"por_que\": str}]"
         % (tema.get('tema'), tema.get('pregunta_investigacion'),
-           _restriccion_multianio(mcat, tema, cob),
+           _restriccion_multianio(mcat, tema, cob), extra,
            json.dumps(det, ensure_ascii=False)))
     return ask_json(prompt, model=MODELOS['seleccionar_variables'])
 

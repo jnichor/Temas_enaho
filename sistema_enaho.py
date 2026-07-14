@@ -470,7 +470,7 @@ class ENAHOApp(App):
             res['analisis'] = await self._paso(log, "Paso 6 · Análisis de módulos", RZ.analizar_tema, cat, tema)
             await self._guardar(res)
             res['manifiesto'] = await self._paso(log, "Paso 7 · Selección de variables",
-                                                 RZ.seleccionar_variables, cat, tema, mcat, cob)
+                                                 RZ.seleccionar_variables, cat, tema, mcat, cob, contexto)
             if len(cob) > 1:   # verificación determinista: cada variable debe existir en TODOS los años
                 res['variables_parciales'] = RZ.disponibilidad_variables(mcat, cat, res['manifiesto'], cob)
                 if res['variables_parciales']:
