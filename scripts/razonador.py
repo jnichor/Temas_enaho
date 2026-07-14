@@ -389,6 +389,33 @@ def disponibilidad_variables(mcat, cat, manifiesto, cob):
     return out
 
 
+def validar_manifiesto(cat, manifiesto):
+    """Verificación DETERMINISTA post-paso 7, MÁS BÁSICA que disponibilidad_variables:
+    ¿cada entrada del manifiesto es un (archivo, variable) que REALMENTE existe en el
+    catálogo del año representativo? A veces la IA devuelve una entrada que no es una
+    variable real (ej. un aviso o limitación disfrazado de ítem del manifiesto, con un
+    'archivo' inventado) — sin este filtro, esa entrada llega intacta a plan_de_datos/
+    verificar_merge/materializar_dataset, que asumen que todo 'archivo' existe en disco,
+    y truena con un FileNotFoundError en vez de un error claro. Devuelve
+    (manifiesto_valido, descartados) — nunca falla en silencio: lo que se descarta queda
+    listado con el motivo."""
+    cols_de = {m['archivo']: {c.upper() for c in m['variables']} for m in cat['modulos']}
+    validos, descartados = [], []
+    for v in manifiesto:
+        if not isinstance(v, dict) or not v.get('archivo') or not v.get('variable'):
+            descartados.append({'item': v, 'motivo': 'entrada sin archivo/variable definidos'})
+            continue
+        arch, var = v['archivo'], v['variable'].upper()
+        if arch not in cols_de:
+            descartados.append({'item': v, 'motivo': 'el archivo "%s" no existe en el catálogo' % arch})
+            continue
+        if var not in cols_de[arch]:
+            descartados.append({'item': v, 'motivo': 'la variable "%s" no existe en %s' % (var, arch)})
+            continue
+        validos.append(v)
+    return validos, descartados
+
+
 # ---------- PLAN DE DATOS: filtros (IA) + merge (determinista) ----------
 def sugerir_filtros(cat, tema, manifiesto):
     det = _modulos_detalle(cat, tema.get('modulos', []))

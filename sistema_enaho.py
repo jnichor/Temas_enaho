@@ -471,6 +471,9 @@ class ENAHOApp(App):
             await self._guardar(res)
             res['manifiesto'] = await self._paso(log, "Paso 7 · Selección de variables",
                                                  RZ.seleccionar_variables, cat, tema, mcat, cob, contexto)
+            res['manifiesto'], descartados = RZ.validar_manifiesto(cat, res['manifiesto'])
+            for d in descartados:
+                log.write(f"[red]⚠ Entrada del manifiesto descartada: {d['motivo']}[/]")
             if len(cob) > 1:   # verificación determinista: cada variable debe existir en TODOS los años
                 res['variables_parciales'] = RZ.disponibilidad_variables(mcat, cat, res['manifiesto'], cob)
                 if res['variables_parciales']:
