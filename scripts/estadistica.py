@@ -83,19 +83,48 @@ def _dup_en_llaves(lf, keys):
     return d.height > 0
 
 
+def _lista_valores_or(condicion):
+    """Reconoce 'in [7, 8, 9]' o '7 or 8' / '== 7 or == 8' como una lista de valores
+    discretos (típico de variables de estrato/dominio/región, donde 'rural' o 'sierra'
+    son VARIOS códigos, no uno solo). Sin eval(): si cualquier término no es un número
+    simple (con o sin '==' delante), no reconoce nada y devuelve None — nunca adivina."""
+    condicion = (condicion or '').strip()
+    m = re.match(r'^\s*in\s*\[\s*(-?\d+(?:[.,]\d+)?(?:\s*,\s*-?\d+(?:[.,]\d+)?)*)\s*\]\s*$', condicion, re.I)
+    if m:
+        return [float(x.strip().replace(',', '.')) for x in m.group(1).split(',')]
+    partes = re.split(r'\s+or\s+', condicion, flags=re.I)
+    if len(partes) < 2:
+        return None
+    valores = []
+    for p in partes:
+        m2 = re.match(r'^\s*(?:==|=)?\s*(-?\d+(?:[.,]\d+)?)\s*$', p.strip())
+        if not m2:
+            return None   # un solo término no numérico invalida todo el reconocimiento
+        valores.append(float(m2.group(1).replace(',', '.')))
+    return valores
+
+
 def _cond_mask(col, condicion):
-    """Convierte una condición numérica simple ('== 1', '!= 1', '>= 65', ...) en una
-    máscara polars. Sin eval(): solo reconoce el patrón operador+número; si la condición
-    no matchea ese patrón devuelve None (el llamador decide qué hacer). Limpia coma
+    """Convierte una condición numérica simple ('== 1', '!= 1', '>= 65', ...), o una
+    lista de valores discretos ('== 7 or == 8', 'in [7,8]'), en una máscara polars.
+    Sin eval(): solo reconoce esos patrones; si la condición no matchea ninguno,
+    devuelve None (el llamador decide qué hacer — nunca se adivina). Limpia coma
     decimal ANTES de castear (igual que _limpia_numerica): sin esto, una columna cruda
     como "45,0" castea a null y el filtro descarta la fila entera en silencio."""
-    m = re.match(r'^\s*(==|!=|>=|<=|>|<|=)?\s*(-?\d+(?:[.,]\d+)?)\s*$', condicion or '')
-    if not m:
-        return None
-    op, val = m.group(1) or '==', float(m.group(2).replace(',', '.'))
+    condicion = (condicion or '').strip()
     c = col.str.replace(',', '.', literal=True).cast(pl.Float64, strict=False)
-    return {'==': c == val, '=': c == val, '!=': c != val,
-            '>=': c >= val, '<=': c <= val, '>': c > val, '<': c < val}[op]
+    m = re.match(r'^\s*(==|!=|>=|<=|>|<|=)?\s*(-?\d+(?:[.,]\d+)?)\s*$', condicion)
+    if m:
+        op, val = m.group(1) or '==', float(m.group(2).replace(',', '.'))
+        return {'==': c == val, '=': c == val, '!=': c != val,
+                '>=': c >= val, '<=': c <= val, '>': c > val, '<': c < val}[op]
+    valores = _lista_valores_or(condicion)
+    if valores is not None:
+        mask = c == valores[0]
+        for v in valores[1:]:
+            mask = mask | (c == v)
+        return mask
+    return None
 
 
 def _weighted_median(x, w):
