@@ -445,6 +445,12 @@ class ENAHOApp(App):
 
             self._set_busy("Paso 5 · sugiriendo temas (multi-año)")
             temas = await asyncio.to_thread(RZ.sugerir_temas_multi, mcat, area, contexto, 4)
+            for t in temas:
+                _, agregados = RZ.completar_modulos_por_valores(cat, t)
+                for a in agregados:
+                    log.write(f"[yellow]⚠ Tema '{t.get('tema')}': se agregó el módulo {a['modulo']} "
+                              f"({a['archivo']}) — su variable {a['variable']}={a['codigo_valor']} "
+                              f"('{a['etiqueta']}') coincide con el tema y no había sido incluida.[/]")
             self._busy = None
             self._refresh_status()   # que la barra no siga mostrando ⏳ durante el modal
             _marca = {'causal_fuerte': '🟢 fuerte', 'causal_debil': '🟡 débil', 'asociacion': '⚪ asociación'}

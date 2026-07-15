@@ -294,6 +294,50 @@ def sugerir_temas(cat, area=None, contexto=None, n=4):
     return _ordenar_por_causalidad(temas)
 
 
+# ---------- grounding determinista: completar módulos por nombre de programa ----------
+_STOP_PROGRAMA = {'programa', 'nacional', 'de', 'la', 'el', 'los', 'las', 'del', 'a', 'para',
+                  'con', 'sin', 'y', 'o', 'sólo', 'solo', 'un', 'una'}
+
+
+def _palabras_clave(texto):
+    return [w for w in re.findall(r"[a-záéíóúñü0-9]+", (texto or '').lower())
+            if w not in _STOP_PROGRAMA and len(w) > 1]
+
+
+def completar_modulos_por_valores(cat, tema):
+    """Si el tema (Paso 5) menciona un programa/categoría específica (ej. 'Pensión 65')
+    que existe como CÓDIGO DE VALOR verificado en el diccionario de algún módulo, pero
+    ese módulo no quedó en tema['modulos'] (ej. porque se eligió un módulo vecino de
+    nombre parecido — 700A en vez de 700B — antes de saber qué variable haría falta),
+    lo agrega. Determinista: solo agrega módulos con una coincidencia de PALABRAS
+    REALES del catálogo contra el texto del tema, nunca inventa. Sin esto, un paso
+    posterior (diseño causal) puede afirmar con total confianza 'ningún módulo
+    identifica X' cuando en realidad existe, solo que en un módulo que Paso 5 no vio."""
+    texto = (tema.get('tema') or '') + ' ' + (tema.get('pregunta_investigacion') or '')
+    palabras_texto = set(_palabras_clave(texto))
+    ya_incluidos = {str(c).upper() for c in (tema.get('modulos') or [])}
+    agregados = []
+    for m in cat['modulos']:
+        cod = str(m['codigo']).upper()
+        if cod in ya_incluidos:
+            continue
+        encontrado = None
+        for var, valores in (m.get('valores') or {}).items():
+            for code, label in (valores or {}).items():
+                claves = _palabras_clave(label)
+                if len(claves) >= 2 and all(c in palabras_texto for c in claves):
+                    encontrado = {'variable': var, 'codigo_valor': code, 'etiqueta': label}
+                    break
+            if encontrado:
+                break
+        if encontrado:
+            agregados.append({'modulo': cod, 'archivo': m['archivo'], **encontrado})
+            ya_incluidos.add(cod)
+    if agregados:
+        tema['modulos'] = sorted(ya_incluidos)
+    return tema, agregados
+
+
 # ---------- PASO 6: análisis de los módulos asociados al tema ----------
 def analizar_tema(cat, tema):
     det = _modulos_detalle(cat, tema.get('modulos', []))
