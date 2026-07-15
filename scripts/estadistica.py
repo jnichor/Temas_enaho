@@ -461,6 +461,50 @@ def verificar_filtros(filtros, year, carpeta=None):
     return rep
 
 
+def verificar_cobertura_filtros(filtros, year, carpeta=None, umbral=0.5):
+    """Para cada filtro, chequea si su variable está mayormente EN BLANCO en el
+    archivo de origen — patrón típico de una pregunta de SEGUIMIENTO CONDICIONAL
+    del cuestionario (ej. 'solo se pregunta si X'). Un filtro así, usado como si
+    fuera una restricción poblacional amplia, colapsa la muestra al pequeño
+    subgrupo al que se le hizo esa pregunta en particular, no a la población que
+    realmente se buscaba filtrar. A diferencia de verificar_filtros() (que detecta
+    combinaciones IMPOSIBLES, 0 filas), esto no da 0 — el filtro sí tiene datos,
+    solo que muy pocos, así que no hay forma de saber automáticamente si es un
+    error o intencional: se reporta como advertencia, no se descarta solo."""
+    rep = []
+    for f in (filtros or []):
+        var = (f.get('variable') or '').upper()
+        cond = f.get('condicion')
+        arch = f.get('archivo')
+        if not (arch and var and cond):
+            continue
+        try:
+            lf = _scan(arch, year, carpeta)
+            cols = _cols(lf)
+            if var not in cols:
+                continue
+            r = lf.select(
+                pl.len().alias('total'),
+                (pl.col(var).is_not_null() & (pl.col(var).str.strip_chars() != '')).sum().alias('con_dato'),
+            ).collect(engine='streaming')
+            total, con_dato = int(r['total'][0]), int(r['con_dato'][0])
+            cobertura = (con_dato / total) if total else 0.0
+            if cobertura < umbral:
+                rep.append({
+                    'archivo': arch, 'variable': var, 'condicion': cond,
+                    'cobertura_pct': round(cobertura * 100, 1), 'total_filas': total, 'con_dato': con_dato,
+                    'alerta': ('"%s" tiene valor en solo %.1f%% de las filas de %s (%d de %d) — probable '
+                              'pregunta condicional del cuestionario, no aplicable a todos; usarla como '
+                              'filtro de población puede colapsar la muestra al subgrupo al que se le '
+                              'preguntó, no a la población que realmente se buscaba filtrar. Verifica en '
+                              'el diccionario si aplica solo bajo alguna condición antes de confiar en el '
+                              'tamaño de muestra resultante'
+                              % (var, cobertura * 100, arch, con_dato, total))})
+        except Exception as e:
+            rep.append({'archivo': arch, 'variable': var, 'error': str(e)})
+    return rep
+
+
 # ----------------------------- exportar dataset final -----------------------------
 def _limpia_numerica(col):
     """comas decimales -> punto, centinelas de no-respuesta -> null, cast Float64.
@@ -521,7 +565,8 @@ def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, anios, rep
     rep = str(rep)
     reporte = {'variables_excluidas': [], 'agregaciones': [], 'restricciones': [],
               'filtros_aplicados': [], 'filtros_omitidos': [], 'columnas_limpiadas': set(),
-              'filtros_contradictorios': [], 'anios': anios, 'anios_con_error': []}
+              'filtros_contradictorios': [], 'filtros_baja_cobertura': [],
+              'anios': anios, 'anios_con_error': []}
     dfs = []
     for year in anios:
         try:
@@ -534,8 +579,8 @@ def materializar_dataset(plan_datos, manifiesto, filtros, resolucion, anios, rep
             reporte['anios_con_error'].append({'anio': year, 'error': str(e)})
             continue
         dfs.append(df_y.with_columns(pl.lit(year).alias('ANIO')))
-        for k in ('variables_excluidas', 'agregaciones', 'restricciones',
-                 'filtros_aplicados', 'filtros_omitidos', 'filtros_contradictorios'):
+        for k in ('variables_excluidas', 'agregaciones', 'restricciones', 'filtros_aplicados',
+                 'filtros_omitidos', 'filtros_contradictorios', 'filtros_baja_cobertura'):
             for item in rep_y.get(k, []):
                 reporte[k].append(dict(item, anio=year))
         reporte['columnas_limpiadas'] |= set(rep_y.get('columnas_limpiadas', []))
@@ -593,7 +638,8 @@ def _materializar_un_anio(plan_datos, manifiesto, filtros, resolucion, year, car
 
     reporte = {'variables_excluidas': [], 'agregaciones': [], 'restricciones': [],
               'filtros_aplicados': [], 'filtros_omitidos': [], 'columnas_limpiadas': [],
-              'filtros_contradictorios': contradicciones}
+              'filtros_contradictorios': contradicciones,
+              'filtros_baja_cobertura': verificar_cobertura_filtros(filtros, year, carpeta)}
     ya_limpias = set()   # columnas que ya salen numéricas y limpias de una agregación
 
     def _prep_archivo(archivo, cols_deseadas, join_keys):

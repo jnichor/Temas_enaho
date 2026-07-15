@@ -619,14 +619,52 @@ def puntuar(tema, brechas, literatura, factibilidad):
         "Tema: %s\nBrechas:\n%s\nLiteratura:\n%s\nFactibilidad de datos (de los pasos previos): %s\n\n"
         "Puntúa con criterios EXPLÍCITOS: impacto_social, relevancia_actual, factibilidad_datos, "
         "originalidad. Justifica cada puntaje con la evidencia anterior, sin inventar.\n"
+        "NO calcules ni menciones un puntaje total ni ningún número de puntaje dentro de 'veredicto': "
+        "ese número se calcula APARTE, de forma determinista, a partir de estos 4 criterios. 'veredicto' "
+        "debe ser SOLO la síntesis cualitativa (qué se puede lograr, qué falta, qué recomendás), sin "
+        "ninguna cifra de puntaje.\n"
         "Devuelve JSON: {\"impacto_social\": {\"puntaje\": num, \"justificacion\": str}, "
         "\"relevancia_actual\": {\"puntaje\": num, \"justificacion\": str}, "
         "\"factibilidad_datos\": {\"puntaje\": num, \"justificacion\": str}, "
-        "\"originalidad\": {\"puntaje\": num, \"justificacion\": str}, "
-        "\"puntaje_total\": num, \"veredicto\": str}"
+        "\"originalidad\": {\"puntaje\": num, \"justificacion\": str}, \"veredicto\": str}"
         % (tema.get('tema'), json.dumps(brechas, ensure_ascii=False),
            json.dumps(literatura, ensure_ascii=False), json.dumps(factibilidad, ensure_ascii=False)))
-    return ask_json(prompt, model=MODELOS['puntuar'])
+    out = ask_json(prompt, model=MODELOS['puntuar'])
+    return _calcular_puntaje_total(out)
+
+
+def _calcular_puntaje_total(out):
+    """El puntaje total NO se le pide a la IA: se calcula DETERMINISTA a partir de los
+    4 criterios que sí justifica. La factibilidad de datos actúa como COMPUERTA
+    multiplicativa, no como un criterio más del promedio: una idea brillante que hoy NO
+    se puede ejecutar con los datos disponibles vale poco en la práctica, sin importar
+    cuán importante sea el tema. Promediarla en partes iguales con impacto/relevancia/
+    originalidad (lo que hacía la IA por su cuenta) inflaba el puntaje de temas inviables
+    — ej. un tema con factibilidad 3/10 (diseño causal inviable, según el propio texto)
+    terminaba con puntaje total 7.25 solo porque el resto de criterios eran altos."""
+    def _p(clave):
+        try:
+            return float((out.get(clave) or {}).get('puntaje'))
+        except (TypeError, ValueError):
+            return 0.0
+    impacto = _p('impacto_social')
+    relevancia = _p('relevancia_actual')
+    factib = _p('factibilidad_datos')
+    original = _p('originalidad')
+    calidad_idea = (impacto + relevancia + original) / 3
+    total = round(calidad_idea * (factib / 10), 2)
+    out['puntaje_total'] = total
+    veredicto_ia = (out.get('veredicto') or '').strip()
+    if factib <= 4:
+        prefijo = ('CONDICIONAL — puntaje total %.2f/10 (calidad de idea %.1f/10 × factibilidad de '
+                  'datos %.1f/10, que actúa como tope): el tema tiene mérito, pero la factibilidad de '
+                  'datos es el cuello de botella y limita el puntaje real. No avanzar sin resolver lo '
+                  'que señala factibilidad_datos.' % (total, calidad_idea, factib))
+    else:
+        prefijo = ('Puntaje total %.2f/10 (calidad de idea %.1f/10 × factibilidad de datos %.1f/10).'
+                  % (total, calidad_idea, factib))
+    out['veredicto'] = (prefijo + ' ' + veredicto_ia) if veredicto_ia else prefijo
+    return out
 
 
 if __name__ == '__main__':

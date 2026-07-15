@@ -499,6 +499,14 @@ class ENAHOApp(App):
                     continue
                 combo = ' + '.join(f"{f['variable']} {f['condicion']}" for f in fc['filtros'])
                 log.write(f"[red]⚠ Filtros contradictorios en {fc['archivo']}:[/] {combo} — {fc['alerta']}")
+            res['filtros_baja_cobertura'] = await self._paso(
+                log, "Plan de datos · verificando cobertura de los filtros",
+                EST.verificar_cobertura_filtros, res['filtros'], rep, carp)
+            for fb in res['filtros_baja_cobertura']:
+                if fb.get('error'):
+                    continue
+                log.write(f"[yellow]⚠ {fb['variable']} en {fb['archivo']}: solo {fb['cobertura_pct']}% de "
+                          f"cobertura ({fb['con_dato']}/{fb['total_filas']}) — puede colapsar la muestra.[/]")
             res['plan_datos'] = RZ.plan_de_datos(cat, tema, res['manifiesto'], res['filtros'])
             log.write(self._panel_plan(res['plan_datos']))
             res['verificacion_merge'] = await self._paso(log, "Plan de datos · verificar merge", EST.verificar_merge, res['plan_datos'], rep, carp)
@@ -649,6 +657,13 @@ class ENAHOApp(App):
                     continue
                 combo = ' + '.join(f"{f['variable']} {f['condicion']}" for f in fc['filtros'])
                 b.append(f"  • {fc['archivo']}: {combo}{_anio(fc)}")
+        if rep.get('filtros_baja_cobertura'):
+            b.append("[yellow]⚠ Filtros de baja cobertura (posible pregunta condicional, revisar tamaño de muestra):[/]")
+            for fb in rep['filtros_baja_cobertura']:
+                if fb.get('error'):
+                    continue
+                b.append(f"  • {fb['archivo']}.{fb['variable']}: {fb['cobertura_pct']}% cobertura "
+                         f"({fb['con_dato']}/{fb['total_filas']}){_anio(fb)}")
         if rep.get('nulos_por_columna'):
             b.append("Nulos: " + ', '.join(f"{c}={n}" for c, n in rep['nulos_por_columna'].items()))
         return Panel("\n".join(b), title="Paso 11 · Dataset final mergeado y limpio",

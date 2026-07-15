@@ -142,6 +142,13 @@ def generar_ficha_pdf(res, cat, out_path):
             combo = ' + '.join('%s %s' % (f['variable'], f['condicion']) for f in fc['filtros'])
             el.append(Paragraph('<font color="#c62828">⚠ Filtros contradictorios en %s (%s):</font> %s%s'
                                 % (fc['archivo'], combo, fc['alerta'], _anio(fc)), small))
+        for fb in de.get('filtros_baja_cobertura', []):
+            if fb.get('error'):
+                continue
+            el.append(Paragraph('<font color="#c62828">⚠ %s.%s tiene solo %s%% de cobertura (%s/%s):</font> '
+                                'posible pregunta condicional del cuestionario — revisa si colapsó la muestra%s'
+                                % (fb['archivo'], fb['variable'], fb['cobertura_pct'], fb['con_dato'],
+                                   fb['total_filas'], _anio(fb)), small))
 
     # Brechas medidas
     br = [b for b in (res.get('brechas') or []) if not b.get('error')]
